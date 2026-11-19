@@ -1,0 +1,12 @@
+{
+  "name": "bolao-da-galera",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plataforma de bolão de jogos entre amigos",
+  "main": "server.js",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "test": "node --no-warnings --test test/*.test.js"
+  }
+}
