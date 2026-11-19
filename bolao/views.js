@@ -124,7 +124,7 @@ function navItems(user) {
        ['conta', '/conta', '⚙', 'Minha conta', 'Conta']];
 }
 
-const BRAND = `<div class="brand-mark">⚽</div><div class="brand-name">BOLÃO DA GALERA<small>PALPITE • DISPUTA • RESENHA</small></div>`;
+const BRAND = `<span class="brand-mark">⚽</span><span class="brand-name">BOLÃO<b>DA GALERA</b></span>`;
 
 function htmlDoc(title, inner) {
   return `<!doctype html>
@@ -132,7 +132,7 @@ function htmlDoc(title, inner) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#07130f">
+<meta name="theme-color" content="#0a0f18">
 <title>${h(title)} · Bolão da Galera</title>
 <link rel="stylesheet" href="/style.css">
 </head>
@@ -142,39 +142,31 @@ ${inner}
 </html>`;
 }
 
-function layout({ title, user, flash, body, active, crumb }) {
+function layout({ title, user, flash, body, active }) {
   if (!user) {
     return htmlDoc(title, `<main class="auth"><div class="auth-box"><a class="brand" href="/">${BRAND}</a>${flashBox(flash)}${body}</div></main>`);
   }
   const items = navItems(user);
   return htmlDoc(title, `
-<div class="app">
-  <aside class="sidebar">
+<header class="site-header">
+  <div class="hdr-inner">
     <a class="brand" href="/">${BRAND}</a>
-    <div class="nav-label">Menu</div>
-    <nav class="nav">
+    <nav class="hnav">
       ${items.map(([key, href, ico, label]) => `<a class="${key === active ? 'active' : ''}" href="${href}"><span class="ico">${ico}</span>${label}</a>`).join('')}
     </nav>
-    <div class="sidebar-bottom">
-      <div class="profile-mini">
-        <div class="avatar">${h(initials(user.name))}</div>
-        <div><b>${h(user.name)}</b><small>${user.is_admin ? 'Administrador' : 'Participante'}</small></div>
-      </div>
-      <form method="post" action="/logout"><button class="btn ghost full">Sair</button></form>
+    <div class="hdr-user">
+      <a class="user-chip" href="/conta" title="Minha conta">
+        <span class="avatar">${h(initials(user.name))}</span>
+        <span class="user-txt"><b>${h(user.name)}</b><small>${user.is_admin ? 'Administrador' : 'Participante'}</small></span>
+      </a>
+      <form method="post" action="/logout" class="logout"><button class="btn ghost sm">Sair</button></form>
     </div>
-  </aside>
-  <div class="main">
-    <header class="topbar">
-      <a class="topbar-brand" href="/"><span class="brand-mark sm">⚽</span></a>
-      <div class="crumb">Bolão da Galera <span class="muted">/</span> <b>${h(crumb || title)}</b></div>
-      <a class="avatar" href="/conta" title="Minha conta">${h(initials(user.name))}</a>
-    </header>
-    <main class="content">
-      ${flashBox(flash)}
-      ${body}
-    </main>
   </div>
-</div>
+</header>
+<main class="content">
+  ${flashBox(flash)}
+  ${body}
+</main>
 <nav class="mobile-nav">
   ${items.map(([key, href, ico, , short]) => `<a class="${key === active ? 'active' : ''}" href="${href}"><b>${ico}</b>${short}</a>`).join('')}
 </nav>`);
