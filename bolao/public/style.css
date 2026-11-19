@@ -150,3 +150,28 @@ table.rank tbody tr:first-child td:first-child { color: var(--gold); font-weight
 ul.list { list-style: none; padding: 0; margin: 0; }
 ul.list li { padding: .5rem 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; justify-content: space-between; gap: .2rem .8rem; }
 ul.list li a { font-weight: 600; text-decoration: none; }
+
+/* Palpites da galera */
+.button-link {
+  display: block; text-align: center; font-weight: 600; text-decoration: none;
+  padding: .6rem 1rem; margin-bottom: .8rem; border-radius: 8px;
+  background: var(--brand-soft); color: var(--brand);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -.3rem; }
+table.grid-table { border-collapse: separate; border-spacing: 0; font-size: .9rem; min-width: 100%; }
+.grid-table th, .grid-table td { padding: .45rem .5rem; border-bottom: 1px solid var(--line); text-align: center; white-space: nowrap; }
+.grid-table th { font-size: .8rem; color: var(--muted); font-weight: 600; }
+.grid-table th.me { color: var(--brand); }
+.grid-table .sticky { position: sticky; left: 0; background: var(--card); text-align: left; z-index: 1; border-right: 1px solid var(--line); }
+.grid-table .gm { white-space: normal; min-width: 9rem; max-width: 12rem; }
+.cell { font-weight: 700; border-radius: 6px; }
+.cell small { display: block; font-size: .7rem; font-weight: 600; opacity: .85; }
+td.cell { box-shadow: inset 0 0 0 2px var(--card); }
+.cell.exact { background: var(--gold-soft); color: var(--gold); }
+.cell.result { background: var(--brand-soft); color: var(--brand); }
+.cell.miss { background: var(--err-soft); color: var(--err); }
+.cell.wait { background: var(--bg); color: var(--text); }
+.cell.none { color: var(--muted); font-weight: 400; }
+.cell.total { font-size: 1.05rem; }
+.legend { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin-top: .8rem; }
+.legend .cell { padding: .1rem .5rem; font-size: .75rem; }

@@ -96,8 +96,12 @@ async function computeRanking(pool) {
     if (pts === pool.points_exact && p.home === p.home_score && p.away === p.away_score) row.exact++;
     else if (pts > 0) row.result++;
   }
-  const rows = [...table.values()].sort((a, b) =>
-    b.points - a.points || b.exact - a.exact || a.name.localeCompare(b.name, 'pt-BR'));
+  return rankRows([...table.values()]);
+}
+
+// Ordena por pontos (desempate: placares exatos) e calcula a posição, com empates.
+function rankRows(rows) {
+  rows.sort((a, b) => b.points - a.points || b.exact - a.exact || a.name.localeCompare(b.name, 'pt-BR'));
   rows.forEach((r, i) => {
     const prev = rows[i - 1];
     r.pos = prev && prev.points === r.points && prev.exact === r.exact ? prev.pos : i + 1;
@@ -297,6 +301,44 @@ route('POST', '/boloes/:id/palpites', async ({ res, user, params, body }) => {
   if (late) msgs.push(`${late} jogo(s) já passaram do prazo e não aceitam mais palpite.`);
   if (invalid) msgs.push(`${invalid} palpite(s) incompleto(s) ou inválido(s) foram ignorados.`);
   redirect(res, `/boloes/${params.id}`, [late || invalid ? 'err' : 'ok', msgs.join(' ') || 'Nenhum palpite enviado.']);
+});
+
+// Tabela com os palpites de todos nos jogos que já fecharam + classificação
+route('GET', '/boloes/:id/galera', async ({ res, user, params }) => {
+  const access = await poolForUser(params.id, user);
+  if (!access) return send(res, 404, V.messagePage({ user, title: 'Bolão não encontrado', msg: 'Você não participa deste bolão.' }));
+  const { pool } = access;
+  const ranking = await computeRanking(pool);
+  const matches = (await all('SELECT * FROM matches WHERE pool_id = ? ORDER BY kickoff_at DESC, id DESC', pool.id))
+    .filter(m => V.matchStatus(m, pool).key !== 'open');
+  const preds = await all(`SELECT p.match_id, p.user_id, p.home, p.away FROM predictions p
+                           JOIN matches m ON m.id = p.match_id WHERE m.pool_id = ?`, pool.id);
+  const byKey = new Map(preds.map(p => [`${p.match_id}:${p.user_id}`, p]));
+  const grid = matches.map(m => ({
+    match: m,
+    cells: ranking.map(u => {
+      const p = byKey.get(`${m.id}:${u.id}`);
+      return p ? { home: p.home, away: p.away, points: scorePrediction(p, m, pool) } : null;
+    }),
+  }));
+  const openCount = (await all('SELECT * FROM matches WHERE pool_id = ?', pool.id))
+    .filter(m => V.matchStatus(m, pool).key === 'open').length;
+  send(res, 200, V.poolGrid({ user, pool, ranking, grid, openCount, member: access.member }));
+});
+
+// Ranking geral: soma dos pontos de todos os bolões
+route('GET', '/ranking', async ({ res, user }) => {
+  const pools = await all('SELECT * FROM pools ORDER BY created_at');
+  const total = new Map();
+  for (const pool of pools) {
+    for (const r of await computeRanking(pool)) {
+      const t = total.get(r.id) || { id: r.id, name: r.name, points: 0, exact: 0, result: 0, byPool: {} };
+      t.points += r.points; t.exact += r.exact; t.result += r.result;
+      t.byPool[pool.id] = r.points;
+      total.set(r.id, t);
+    }
+  }
+  send(res, 200, V.generalRanking({ user, pools, ranking: rankRows([...total.values()]) }));
 });
 
 route('GET', '/boloes/:id/jogos/:mid', async ({ res, user, params }) => {

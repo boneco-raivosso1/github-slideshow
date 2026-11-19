@@ -62,7 +62,8 @@ Observações:
 ## Regras
 
 - Palpites podem ser feitos e alterados até o prazo do jogo. Em cada bolão, o admin define quantos minutos antes de cada jogo os palpites fecham e, se quiser, um prazo final fixo (vale o que fechar primeiro).
-- Os palpites dos outros só aparecem depois que os palpites daquele jogo fecham.
+- Quando os palpites de um jogo fecham, todo mundo vê os palpites de todos em "Palpites da galera" (tabela com os pontos de cada um).
+- "Ranking geral" soma os pontos de todos os bolões.
 - Pontuação (configurável por bolão): **placar exato = 3 pts**, **acertar vencedor ou empate = 1 pt**.
 - Desempate na classificação: mais placares exatos.
 

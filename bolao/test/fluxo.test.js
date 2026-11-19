@@ -113,6 +113,19 @@ test('fluxo completo: admin, participante, palpite, resultado e ranking', async 
   assert.match(page, /Maria<\/td><td><strong>1<\/strong>/);
   assert.ok(page.indexOf('João</td>') < page.indexOf('Maria</td>'));
 
+  // tabela com palpites de todos: só jogos fechados (jogo 2 ainda aberto não aparece)
+  const galera = (await maria.get('/boloes/1/galera')).text;
+  assert.match(galera, /Flamengo <strong>2×1<\/strong> Palmeiras/);
+  assert.doesNotMatch(galera, /Grêmio/);
+  assert.match(galera, /cell exact">2×1<small>\+3/);   // João
+  assert.match(galera, /cell result">1×0<small>\+1/);  // Maria
+  assert.equal((await joao.get('/boloes/2/galera')).status, 404);
+
+  // ranking geral soma os bolões
+  const geral = (await joao.get('/ranking')).text;
+  assert.match(geral, /Ranking geral/);
+  assert.ok(geral.indexOf('João</td>') < geral.indexOf('Maria</td>'));
+
   const detail = (await maria.get('/boloes/1/jogos/1')).text;
   assert.match(detail, /2 × 1/);
   assert.match(detail, /Placar exato/);

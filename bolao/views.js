@@ -74,6 +74,7 @@ function layout({ title, user, flash, body }) {
     <nav>
       ${user.is_admin ? '<a href="/admin">Administração</a>' : ''}
       <a href="/boloes">Meus bolões</a>
+      <a href="/ranking">Ranking geral</a>
       <a href="/conta">Minha conta</a>
       <form method="post" action="/logout" class="inline"><button class="link">Sair</button></form>
     </nav>` : '';
@@ -190,14 +191,16 @@ function memberPool({ user, flash, pool, matches, ranking }) {
           <p class="small muted">Você pode alterar seus palpites até o prazo de cada jogo.</p>`
           : '<p class="muted">Nenhum jogo aberto para palpites no momento.</p>'}
         </section>
-        ${closed.length ? `<section class="card"><h2>Jogos fechados</h2>${closedCards}</section>` : ''}
+        ${closed.length ? `<section class="card"><h2>Jogos fechados</h2>
+          <a class="button-link" href="/boloes/${pool.id}/galera">👀 Ver palpites de todo mundo</a>
+          ${closedCards}</section>` : ''}
       </div>
-      <aside>${rankingTable(ranking, user)}</aside>
+      <aside>${rankingTable(ranking, user, pool)}</aside>
     </div>`,
   });
 }
 
-function rankingTable(ranking, user) {
+function rankingTable(ranking, user, pool) {
   if (!ranking.length) return '';
   return `
   <section class="card">
@@ -212,7 +215,67 @@ function rankingTable(ranking, user) {
       </tbody>
     </table>
     <p class="small muted">PE = placares exatos · AV = acertos de vencedor/empate</p>
+    ${pool ? `<a class="small" href="/boloes/${pool.id}/galera">Ver palpites de todo mundo →</a>` : ''}
   </section>`;
+}
+
+function cellHtml(c, pool) {
+  if (!c) return '<td class="cell none">—</td>';
+  const cls = c.points == null ? 'wait' : c.points === pool.points_exact ? 'exact' : c.points > 0 ? 'result' : 'miss';
+  return `<td class="cell ${cls}">${c.home}×${c.away}${c.points != null ? `<small>+${c.points}</small>` : ''}</td>`;
+}
+
+function poolGrid({ user, pool, ranking, grid, openCount, member }) {
+  const table = grid.length ? `
+    <div class="table-scroll">
+      <table class="grid-table">
+        <thead><tr><th class="sticky">Jogo</th>${ranking.map(u => `<th class="${u.id === user.id ? 'me' : ''}">${h(u.name)}</th>`).join('')}</tr></thead>
+        <tbody>
+          ${grid.map(({ match: m, cells }) => `
+          <tr>
+            <td class="sticky">
+              <div class="gm">${h(m.home_team)} <strong>${m.home_score != null ? `${m.home_score}×${m.away_score}` : '×'}</strong> ${h(m.away_team)}</div>
+              <div class="small muted">${fmtDate(m.kickoff_at)}</div>
+            </td>
+            ${cells.map(c => cellHtml(c, pool)).join('')}
+          </tr>`).join('')}
+        </tbody>
+        <tfoot><tr><td class="sticky"><strong>Total</strong></td>${ranking.map(u => `<td class="cell total">${u.points}</td>`).join('')}</tr></tfoot>
+      </table>
+    </div>
+    <p class="small muted legend">
+      <span class="cell exact">placar exato</span> <span class="cell result">acertou vencedor</span>
+      <span class="cell miss">errou</span> <span class="cell wait">aguardando resultado</span> — = não palpitou
+    </p>` : '<p class="muted">Nenhum jogo fechado ainda. Os palpites aparecem aqui assim que o prazo de cada jogo acabar.</p>';
+  return layout({
+    title: `Palpites · ${pool.name}`, user, body: `
+    <p><a href="${member ? `/boloes/${pool.id}` : `/admin/boloes/${pool.id}`}">← ${h(pool.name)}</a></p>
+    <h1>Palpites da galera</h1>
+    <p class="small muted">${h(pool.name)} · só aparecem os jogos com palpites já fechados${openCount ? ` (${openCount} jogo(s) ainda aberto(s))` : ''}.</p>
+    ${rankingTable(ranking, user)}
+    <section class="card"><h2>Todos os palpites</h2>
+      ${grid.length && ranking.length > 2 ? '<p class="small muted">Arraste a tabela para o lado para ver todo mundo →</p>' : ''}
+      ${table}</section>`,
+  });
+}
+
+function generalRanking({ user, pools, ranking }) {
+  const body = ranking.length ? `
+    <div class="table-scroll">
+      <table class="rank">
+        <thead><tr><th>#</th><th>Participante</th><th>Total</th><th title="Placares exatos">PE</th><th title="Acertos de vencedor/empate">AV</th>
+          ${pools.map(p => `<th>${h(p.name)}</th>`).join('')}</tr></thead>
+        <tbody>
+          ${ranking.map(r => `<tr class="${r.id === user.id ? 'me' : ''}">
+            <td>${r.pos}º</td><td>${h(r.name)}</td><td><strong>${r.points}</strong></td><td>${r.exact}</td><td>${r.result}</td>
+            ${pools.map(p => `<td>${r.byPool[p.id] ?? '<span class="muted">–</span>'}</td>`).join('')}
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <p class="small muted">Soma dos pontos de todos os bolões. "–" = não participa daquele bolão. PE = placares exatos · AV = acertos de vencedor/empate.</p>`
+    : '<p class="muted">Ainda não há participantes em nenhum bolão.</p>';
+  return layout({ title: 'Ranking geral', user, body: `<h1>🏆 Ranking geral</h1><section class="card">${body}</section>` });
 }
 
 function matchPredictions({ user, pool, match, rows }) {
@@ -398,7 +461,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
             <button>Salvar participantes</button>
           </form>
         </section>
-        ${rankingTable(ranking, null)}
+        ${rankingTable(ranking, null, pool)}
         <section class="card" id="config">
           <h2>Configurações</h2>
           <form method="post" action="/admin/boloes/${pool.id}" class="stack">
@@ -423,5 +486,5 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
 module.exports = {
   h, fmtDate, matchStatus, closesAt, TIMEZONE,
   loginPage, messagePage, memberHome, memberPool, matchPredictions, accountPage,
-  adminHome, adminUser, adminPool,
+  adminHome, adminUser, adminPool, poolGrid, generalRanking,
 };
