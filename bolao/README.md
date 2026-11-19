@@ -9,10 +9,11 @@ Site para organizar bolões de jogos entre amigos, sem caderno nem planilha.
 
 ## Como rodar
 
-Precisa só do [Node.js](https://nodejs.org) 22.13 ou mais novo. Não há dependências para instalar.
+Precisa do [Node.js](https://nodejs.org) 20 ou mais novo.
 
 ```bash
 cd bolao
+npm install
 npm start
 ```
 
@@ -26,9 +27,37 @@ Abra http://localhost:3000. Na primeira vez, o terminal mostra o usuário e a se
 | `PORT`           | `3000`                 | Porta do servidor                                 |
 | `ADMIN_USER`     | `admin`                | Usuário do primeiro administrador                 |
 | `ADMIN_PASSWORD` | aleatória              | Senha do primeiro administrador                   |
-| `DB_PATH`        | `data/bolao.db`        | Arquivo do banco de dados (SQLite)                |
+| `DATABASE_URL`   | —                      | Endereço do banco Postgres (ex.: Neon). Sem ele, os dados ficam na pasta `data/` |
 | `TIMEZONE`       | `America/Sao_Paulo`    | Fuso usado nos horários dos jogos                 |
 | `COOKIE_SECURE`  | —                      | Use `1` quando o site estiver em HTTPS            |
+
+## Publicar na internet (grátis: Render + Neon)
+
+**1. Banco de dados (Neon)**
+1. Crie uma conta em https://neon.tech (dá para entrar com o GitHub).
+2. Crie um projeto (região: *São Paulo* se existir, senão *US East*).
+3. Copie a **connection string**: começa com `postgresql://` e termina com `?sslmode=require`.
+
+**2. Site (Render)**
+1. Crie uma conta em https://render.com entrando com o GitHub.
+2. Clique em **New → Web Service** e escolha o repositório `github-slideshow`.
+3. Preencha:
+   - **Branch**: `claude/sports-betting-platform-44gcnj`
+   - **Root Directory**: `bolao`
+   - **Build Command**: `npm install`
+   - **Start Command**: `npm start`
+   - **Instance Type**: *Free*
+4. Em **Environment Variables**, adicione:
+   - `DATABASE_URL` = a connection string do Neon
+   - `ADMIN_PASSWORD` = a senha que você quer para o administrador
+   - `COOKIE_SECURE` = `1`
+5. Clique em **Deploy**. Em alguns minutos o site fica no ar num endereço tipo
+   `https://bolao-xxxx.onrender.com`. Entre com o usuário `admin` e a senha que você escolheu.
+
+Observações:
+- No plano grátis, o site "dorme" depois de 15 minutos sem uso, e a primeira abertura demora uns 30 a 50 segundos.
+  Os dados não se perdem, porque ficam no Neon.
+- `ADMIN_PASSWORD` só vale na criação do administrador. Depois, troque a senha em **Minha conta**.
 
 ## Regras
 
@@ -40,12 +69,13 @@ Abra http://localhost:3000. Na primeira vez, o terminal mostra o usuário e a se
 ## Testes
 
 ```bash
-npm test
+npm test                                          # usa um Postgres embutido em memória
+TEST_DATABASE_URL=postgres://... npm test         # contra um Postgres real (use um banco vazio)
 ```
 
 ## Estrutura
 
 - `server.js` — servidor, rotas, login e regras de pontuação
 - `views.js` — páginas HTML
-- `db.js` — banco de dados SQLite (embutido no Node)
+- `db.js` — banco de dados Postgres (Neon em produção, PGlite embutido no computador)
 - `public/style.css` — visual (funciona no celular e tem modo escuro)

@@ -1,25 +1,25 @@
 'use strict';
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bolao-'));
-process.env.DB_PATH = path.join(tmp, 'test.db');
+// Por padrão usa o Postgres embutido em memória.
+// Para testar contra um Postgres real (banco vazio!): TEST_DATABASE_URL=postgres://... npm test
+if (process.env.TEST_DATABASE_URL) process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+else { delete process.env.DATABASE_URL; process.env.DB_PATH = 'memory'; }
 process.env.ADMIN_USER = 'admin';
 process.env.ADMIN_PASSWORD = 'segredo';
 
-const { ensureAdmin, run } = require('../db');
+const { init, ensureAdmin, run, close } = require('../db');
 const { server, scorePrediction, localInputToISO } = require('../server');
 
 let base;
 before(async () => {
-  ensureAdmin();
+  await init();
+  await ensureAdmin();
   await new Promise(r => server.listen(0, r));
   base = `http://localhost:${server.address().port}`;
 });
-after(() => { server.close(); fs.rmSync(tmp, { recursive: true, force: true }); });
+after(async () => { server.close(); await close(); });
 
 // Cliente simples que guarda o cookie de sessão
 function client() {
@@ -101,7 +101,7 @@ test('fluxo completo: admin, participante, palpite, resultado e ranking', async 
   assert.equal((await maria.get('/boloes/1/jogos/1')).status, 403);
 
   // jogo 1 "começa" e termina 2x1
-  run("UPDATE matches SET kickoff_at = '2020-01-01T00:00:00.000Z' WHERE id = 1");
+  await run("UPDATE matches SET kickoff_at = '2020-01-01T00:00:00.000Z' WHERE id = 1");
   r = await joao.post('/boloes/1/palpites', { h_1: '5', a_1: '0' });
   assert.match(decodeURIComponent(r.location), /já começaram/);
   r = await admin.post('/admin/jogos/1', { home_team: 'Flamengo', away_team: 'Palmeiras', kickoff: '2020-01-01T00:00', home_score: '2', away_score: '1' });

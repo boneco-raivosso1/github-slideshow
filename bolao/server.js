@@ -3,7 +3,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { all, get, run, tx, hashPassword, verifyPassword, ensureAdmin } = require('./db');
+const { init, all, get, run, tx, hashPassword, verifyPassword, ensureAdmin } = require('./db');
 const V = require('./views');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -81,10 +81,10 @@ function scorePrediction(pred, match, pool) {
   return 0;
 }
 
-function computeRanking(pool) {
-  const members = all(`SELECT u.id, u.name FROM pool_members pm JOIN users u ON u.id = pm.user_id
+async function computeRanking(pool) {
+  const members = await all(`SELECT u.id, u.name FROM pool_members pm JOIN users u ON u.id = pm.user_id
                        WHERE pm.pool_id = ? ORDER BY u.name`, pool.id);
-  const preds = all(`SELECT p.user_id, p.home, p.away, m.home_score, m.away_score
+  const preds = await all(`SELECT p.user_id, p.home, p.away, m.home_score, m.away_score
                      FROM predictions p JOIN matches m ON m.id = p.match_id
                      WHERE m.pool_id = ? AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL`, pool.id);
   const table = new Map(members.map(u => [u.id, { ...u, points: 0, exact: 0, result: 0 }]));
@@ -107,20 +107,20 @@ function computeRanking(pool) {
 
 // ---------------------------------------------------------------- sessões
 
-function createSession(res, userId) {
+async function createSession(res, userId) {
   const token = crypto.randomBytes(32).toString('hex');
-  run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)',
+  await run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)',
     token, userId, Date.now() + SESSION_DAYS * 864e5);
   res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_DAYS * 86400}${COOKIE_SECURE ? '; Secure' : ''}`);
 }
 
-function currentUser(req) {
+async function currentUser(req) {
   const token = parseCookies(req.headers.cookie).sid;
   if (!token) return null;
-  const row = get(`SELECT u.id, u.username, u.name, u.is_admin, u.active, s.expires_at
-                   FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`, token);
-  if (!row || row.expires_at < Date.now() || !row.active) return null;
-  return row;
+  const row = await get(`SELECT u.id, u.username, u.name, u.is_admin, u.active
+                         FROM sessions s JOIN users u ON u.id = s.user_id
+                         WHERE s.token = ? AND s.expires_at > ? AND u.active = 1`, token, Date.now());
+  return row || null;
 }
 
 // ---------------------------------------------------------------- roteador
@@ -177,13 +177,13 @@ const server = http.createServer(async (req, res) => {
       if (!m) continue;
       const params = {};
       r.keys.forEach((k, i) => { params[k] = Number(m[i + 1]); });
-      const user = currentUser(req);
+      const user = await currentUser(req);
       if (!r.opts.public && !user) return redirect(res, '/login');
       if (r.opts.admin && !user.is_admin) return send(res, 403, V.messagePage({ user, title: 'Acesso negado', msg: 'Essa área é só para o administrador.' }));
       const body = req.method === 'POST' ? await readBody(req) : {};
       return await r.handler({ req, res, url, params, body, user, flash: flashFrom(url) });
     }
-    send(res, 404, V.messagePage({ user: currentUser(req), title: 'Página não encontrada', msg: 'Não achamos o que você procurava.' }));
+    send(res, 404, V.messagePage({ user: await currentUser(req), title: 'Página não encontrada', msg: 'Não achamos o que você procurava.' }));
   } catch (err) {
     console.error(err);
     if (!res.headersSent) send(res, 500, V.messagePage({ title: 'Erro', msg: 'Algo deu errado. Tente novamente.' }));
@@ -202,64 +202,64 @@ route('GET', '/login', { public: true }, ({ res, user }) => {
   send(res, 200, V.loginPage({}));
 });
 
-route('POST', '/login', { public: true }, ({ res, body }) => {
+route('POST', '/login', { public: true }, async ({ res, body }) => {
   const username = str(body.username, 50);
-  const u = get('SELECT * FROM users WHERE username = ?', username);
+  const u = await get('SELECT * FROM users WHERE lower(username) = lower(?)', username);
   if (!u || !verifyPassword(String(body.password || ''), u.password_hash)) {
     return send(res, 401, V.loginPage({ error: 'Usuário ou senha incorretos.', username }));
   }
   if (!u.active) return send(res, 403, V.loginPage({ error: 'Sua conta está desativada. Fale com o administrador.', username }));
-  run('DELETE FROM sessions WHERE expires_at < ?', Date.now());
-  createSession(res, u.id);
+  await run('DELETE FROM sessions WHERE expires_at < ?', Date.now());
+  await createSession(res, u.id);
   redirect(res, u.is_admin ? '/admin' : '/boloes');
 });
 
-route('POST', '/logout', { public: true }, ({ req, res }) => {
+route('POST', '/logout', { public: true }, async ({ req, res }) => {
   const token = parseCookies(req.headers.cookie).sid;
-  if (token) run('DELETE FROM sessions WHERE token = ?', token);
+  if (token) await run('DELETE FROM sessions WHERE token = ?', token);
   res.setHeader('Set-Cookie', 'sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
   redirect(res, '/login');
 });
 
 route('GET', '/conta', ({ res, user, flash }) => send(res, 200, V.accountPage({ user, flash })));
 
-route('POST', '/conta/senha', ({ res, user, body }) => {
-  const u = get('SELECT password_hash FROM users WHERE id = ?', user.id);
+route('POST', '/conta/senha', async ({ res, user, body }) => {
+  const u = await get('SELECT password_hash FROM users WHERE id = ?', user.id);
   if (!verifyPassword(String(body.current || ''), u.password_hash)) return redirect(res, '/conta', ['err', 'Senha atual incorreta.']);
   const pw = String(body.password || '');
   if (pw.length < 4) return redirect(res, '/conta', ['err', 'A nova senha precisa ter pelo menos 4 caracteres.']);
   if (pw !== body.password2) return redirect(res, '/conta', ['err', 'As senhas novas não conferem.']);
-  run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(pw), user.id);
+  await run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(pw), user.id);
   redirect(res, '/conta', ['ok', 'Senha alterada!']);
 });
 
 // ---------------------------------------------------------------- rotas: participante
 
-function poolForUser(poolId, user) {
-  const pool = get('SELECT * FROM pools WHERE id = ?', poolId);
+async function poolForUser(poolId, user) {
+  const pool = await get('SELECT * FROM pools WHERE id = ?', poolId);
   if (!pool) return null;
-  const member = get('SELECT 1 FROM pool_members WHERE pool_id = ? AND user_id = ?', poolId, user.id);
+  const member = await get('SELECT 1 FROM pool_members WHERE pool_id = ? AND user_id = ?', poolId, user.id);
   return member || user.is_admin ? { pool, member: !!member } : null;
 }
 
-route('GET', '/boloes', ({ res, user, flash }) => {
+route('GET', '/boloes', async ({ res, user, flash }) => {
   const now = new Date().toISOString();
-  const pools = all(`
+  const pools = await all(`
     SELECT p.*,
-      (SELECT COUNT(*) FROM matches m WHERE m.pool_id = p.id AND m.kickoff_at > ?) AS open_count,
-      (SELECT COUNT(*) FROM matches m WHERE m.pool_id = p.id AND m.kickoff_at > ?
+      (SELECT COUNT(*)::int FROM matches m WHERE m.pool_id = p.id AND m.kickoff_at > ?) AS open_count,
+      (SELECT COUNT(*)::int FROM matches m WHERE m.pool_id = p.id AND m.kickoff_at > ?
          AND NOT EXISTS (SELECT 1 FROM predictions x WHERE x.match_id = m.id AND x.user_id = ?)) AS pending_count
     FROM pools p JOIN pool_members pm ON pm.pool_id = p.id AND pm.user_id = ?
     ORDER BY p.name`, now, now, user.id, user.id);
   send(res, 200, V.memberHome({ user, flash, pools }));
 });
 
-route('GET', '/boloes/:id', ({ res, user, params, flash }) => {
-  const access = poolForUser(params.id, user);
+route('GET', '/boloes/:id', async ({ res, user, params, flash }) => {
+  const access = await poolForUser(params.id, user);
   if (!access) return send(res, 404, V.messagePage({ user, title: 'Bolão não encontrado', msg: 'Você não participa deste bolão.' }));
   const { pool } = access;
   if (!access.member) return redirect(res, `/admin/boloes/${pool.id}`);
-  const matches = all(`SELECT m.*, p.home AS my_home, p.away AS my_away
+  const matches = await all(`SELECT m.*, p.home AS my_home, p.away AS my_away
                        FROM matches m LEFT JOIN predictions p ON p.match_id = m.id AND p.user_id = ?
                        WHERE m.pool_id = ? ORDER BY m.kickoff_at, m.id`, user.id, pool.id);
   for (const m of matches) m.points = scorePrediction({ home: m.my_home, away: m.my_away }, m, pool);
@@ -267,15 +267,15 @@ route('GET', '/boloes/:id', ({ res, user, params, flash }) => {
   matches.sort((a, b) => a.kickoff_at.localeCompare(b.kickoff_at));
   const open = matches.filter(m => V.matchStatus(m).key === 'open');
   const closed = matches.filter(m => V.matchStatus(m).key !== 'open').reverse();
-  send(res, 200, V.memberPool({ user, flash, pool, matches: [...open, ...closed], ranking: computeRanking(pool) }));
+  send(res, 200, V.memberPool({ user, flash, pool, matches: [...open, ...closed], ranking: await computeRanking(pool) }));
 });
 
-route('POST', '/boloes/:id/palpites', ({ res, user, params, body }) => {
-  const access = poolForUser(params.id, user);
+route('POST', '/boloes/:id/palpites', async ({ res, user, params, body }) => {
+  const access = await poolForUser(params.id, user);
   if (!access || !access.member) return redirect(res, '/boloes', ['err', 'Você não participa deste bolão.']);
-  const matches = all('SELECT * FROM matches WHERE pool_id = ?', params.id);
+  const matches = await all('SELECT * FROM matches WHERE pool_id = ?', params.id);
   let saved = 0, late = 0, invalid = 0;
-  tx(() => {
+  await tx(async ({ run }) => {
     for (const m of matches) {
       const hk = `h_${m.id}`, ak = `a_${m.id}`;
       if (!(hk in body) && !(ak in body)) continue;
@@ -283,8 +283,8 @@ route('POST', '/boloes/:id/palpites', ({ res, user, params, body }) => {
       if (home === null && away === null) continue;
       if (home == null || away == null) { invalid++; continue; }
       if (Date.now() >= Date.parse(m.kickoff_at)) { late++; continue; }
-      run(`INSERT INTO predictions (match_id, user_id, home, away) VALUES (?, ?, ?, ?)
-           ON CONFLICT (match_id, user_id) DO UPDATE SET home = excluded.home, away = excluded.away, updated_at = datetime('now')`,
+      await run(`INSERT INTO predictions (match_id, user_id, home, away) VALUES (?, ?, ?, ?)
+           ON CONFLICT (match_id, user_id) DO UPDATE SET home = excluded.home, away = excluded.away, updated_at = now()`,
         m.id, user.id, home, away);
       saved++;
     }
@@ -296,14 +296,14 @@ route('POST', '/boloes/:id/palpites', ({ res, user, params, body }) => {
   redirect(res, `/boloes/${params.id}`, [late || invalid ? 'err' : 'ok', msgs.join(' ') || 'Nenhum palpite enviado.']);
 });
 
-route('GET', '/boloes/:id/jogos/:mid', ({ res, user, params }) => {
-  const access = poolForUser(params.id, user);
-  const match = access && get('SELECT * FROM matches WHERE id = ? AND pool_id = ?', params.mid, params.id);
+route('GET', '/boloes/:id/jogos/:mid', async ({ res, user, params }) => {
+  const access = await poolForUser(params.id, user);
+  const match = access && await get('SELECT * FROM matches WHERE id = ? AND pool_id = ?', params.mid, params.id);
   if (!match) return send(res, 404, V.messagePage({ user, title: 'Jogo não encontrado', msg: 'Esse jogo não existe ou você não tem acesso.' }));
   if (!user.is_admin && V.matchStatus(match).key === 'open') {
     return send(res, 403, V.messagePage({ user, title: 'Ainda não', msg: 'Os palpites da galera só aparecem depois que o jogo começa.' }));
   }
-  const rows = all(`SELECT u.id AS user_id, u.name, p.home, p.away
+  const rows = await all(`SELECT u.id AS user_id, u.name, p.home, p.away
                     FROM pool_members pm JOIN users u ON u.id = pm.user_id
                     LEFT JOIN predictions p ON p.match_id = ? AND p.user_id = u.id
                     WHERE pm.pool_id = ? ORDER BY u.name`, match.id, params.id);
@@ -315,62 +315,66 @@ route('GET', '/boloes/:id/jogos/:mid', ({ res, user, params }) => {
 // ---------------------------------------------------------------- rotas: admin
 
 const ADMIN = { admin: true };
+// Adiciona (bolão, participante) se ambos existirem; ignora se já for membro.
+const ADD_MEMBER = `INSERT INTO pool_members (pool_id, user_id)
+  SELECT p.id, u.id FROM pools p, users u WHERE p.id = ?::int AND u.id = ?::int
+  ON CONFLICT DO NOTHING`;
 
-route('GET', '/admin', ADMIN, ({ res, user, flash }) => {
-  const users = all(`SELECT u.*, (SELECT COUNT(*) FROM pool_members pm WHERE pm.user_id = u.id) AS pools
+route('GET', '/admin', ADMIN, async ({ res, user, flash }) => {
+  const users = await all(`SELECT u.*, (SELECT COUNT(*)::int FROM pool_members pm WHERE pm.user_id = u.id) AS pools
                      FROM users u ORDER BY u.is_admin DESC, u.name`);
-  const pools = all(`SELECT p.*, (SELECT COUNT(*) FROM pool_members pm WHERE pm.pool_id = p.id) AS members,
-                     (SELECT COUNT(*) FROM matches m WHERE m.pool_id = p.id) AS matches
+  const pools = await all(`SELECT p.*, (SELECT COUNT(*)::int FROM pool_members pm WHERE pm.pool_id = p.id) AS members,
+                     (SELECT COUNT(*)::int FROM matches m WHERE m.pool_id = p.id) AS matches
                      FROM pools p ORDER BY p.created_at DESC`);
   send(res, 200, V.adminHome({ user, flash, users, pools }));
 });
 
 // --- participantes
 
-route('POST', '/admin/usuarios', ADMIN, ({ res, body }) => {
+route('POST', '/admin/usuarios', ADMIN, async ({ res, body }) => {
   const name = str(body.name, 60), username = str(body.username, 30), password = String(body.password || '');
   if (!name || !/^[A-Za-z0-9_.-]{3,30}$/.test(username)) return redirect(res, '/admin', ['err', 'Nome ou usuário inválido.']);
   if (password.length < 4) return redirect(res, '/admin', ['err', 'A senha precisa ter pelo menos 4 caracteres.']);
-  if (get('SELECT 1 FROM users WHERE username = ?', username)) return redirect(res, '/admin', ['err', `O usuário "${username}" já existe.`]);
-  tx(() => {
-    const { lastInsertRowid: id } = run('INSERT INTO users (username, name, password_hash) VALUES (?, ?, ?)', username, name, hashPassword(password));
-    for (const pid of asIds(body.pools)) run('INSERT OR IGNORE INTO pool_members (pool_id, user_id) SELECT id, ? FROM pools WHERE id = ?', id, pid);
+  if (await get('SELECT 1 FROM users WHERE lower(username) = lower(?)', username)) return redirect(res, '/admin', ['err', `O usuário "${username}" já existe.`]);
+  await tx(async ({ get, run }) => {
+    const { id } = await get('INSERT INTO users (username, name, password_hash) VALUES (?, ?, ?) RETURNING id', username, name, hashPassword(password));
+    for (const pid of asIds(body.pools)) await run(ADD_MEMBER, pid, id);
   });
   redirect(res, '/admin', ['ok', `Participante ${name} criado. Passe para ele(a): usuário "${username}" e a senha que você definiu.`]);
 });
 
-route('GET', '/admin/usuarios/:id', ADMIN, ({ res, user, params, flash }) => {
-  const target = get('SELECT * FROM users WHERE id = ?', params.id);
+route('GET', '/admin/usuarios/:id', ADMIN, async ({ res, user, params, flash }) => {
+  const target = await get('SELECT * FROM users WHERE id = ?', params.id);
   if (!target) return redirect(res, '/admin', ['err', 'Participante não encontrado.']);
-  const pools = all('SELECT id, name FROM pools ORDER BY name');
-  const memberOf = new Set(all('SELECT pool_id FROM pool_members WHERE user_id = ?', target.id).map(r => r.pool_id));
+  const pools = await all('SELECT id, name FROM pools ORDER BY name');
+  const memberOf = new Set((await all('SELECT pool_id FROM pool_members WHERE user_id = ?', target.id)).map(r => r.pool_id));
   send(res, 200, V.adminUser({ user, flash, target, pools, memberOf }));
 });
 
-route('POST', '/admin/usuarios/:id', ADMIN, ({ res, user, params, body }) => {
-  const target = get('SELECT * FROM users WHERE id = ?', params.id);
+route('POST', '/admin/usuarios/:id', ADMIN, async ({ res, user, params, body }) => {
+  const target = await get('SELECT * FROM users WHERE id = ?', params.id);
   if (!target) return redirect(res, '/admin', ['err', 'Participante não encontrado.']);
   const name = str(body.name, 60);
   if (!name) return redirect(res, `/admin/usuarios/${target.id}`, ['err', 'Informe o nome.']);
   const password = String(body.password || '');
   if (password && password.length < 4) return redirect(res, `/admin/usuarios/${target.id}`, ['err', 'A senha precisa ter pelo menos 4 caracteres.']);
   const active = target.id === user.id ? 1 : (body.active ? 1 : 0);
-  tx(() => {
-    run('UPDATE users SET name = ?, active = ? WHERE id = ?', name, active, target.id);
+  await tx(async ({ run }) => {
+    await run('UPDATE users SET name = ?, active = ? WHERE id = ?', name, active, target.id);
     if (password) {
-      run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), target.id);
-      if (target.id !== user.id) run('DELETE FROM sessions WHERE user_id = ?', target.id);
+      await run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), target.id);
+      if (target.id !== user.id) await run('DELETE FROM sessions WHERE user_id = ?', target.id);
     }
-    if (!active) run('DELETE FROM sessions WHERE user_id = ?', target.id);
-    run('DELETE FROM pool_members WHERE user_id = ?', target.id);
-    for (const pid of asIds(body.pools)) run('INSERT OR IGNORE INTO pool_members (pool_id, user_id) SELECT id, ? FROM pools WHERE id = ?', target.id, pid);
+    if (!active) await run('DELETE FROM sessions WHERE user_id = ?', target.id);
+    await run('DELETE FROM pool_members WHERE user_id = ?', target.id);
+    for (const pid of asIds(body.pools)) await run(ADD_MEMBER, pid, target.id);
   });
   redirect(res, `/admin/usuarios/${target.id}`, ['ok', 'Alterações salvas.']);
 });
 
-route('POST', '/admin/usuarios/:id/excluir', ADMIN, ({ res, user, params }) => {
+route('POST', '/admin/usuarios/:id/excluir', ADMIN, async ({ res, user, params }) => {
   if (params.id === user.id) return redirect(res, '/admin', ['err', 'Você não pode excluir a si mesmo.']);
-  run('DELETE FROM users WHERE id = ?', params.id);
+  await run('DELETE FROM users WHERE id = ?', params.id);
   redirect(res, '/admin', ['ok', 'Participante excluído.']);
 });
 
@@ -382,56 +386,56 @@ function poolFields(body) {
   return { name: str(body.name, 80), description: str(body.description, 200), points_exact, points_result };
 }
 
-route('POST', '/admin/boloes', ADMIN, ({ res, body }) => {
+route('POST', '/admin/boloes', ADMIN, async ({ res, body }) => {
   const f = poolFields(body);
   if (!f.name || f.points_exact == null || f.points_result == null) return redirect(res, '/admin', ['err', 'Preencha nome e pontuação corretamente.']);
-  const { lastInsertRowid } = run('INSERT INTO pools (name, description, points_exact, points_result) VALUES (?, ?, ?, ?)',
+  const { id } = await get('INSERT INTO pools (name, description, points_exact, points_result) VALUES (?, ?, ?, ?) RETURNING id',
     f.name, f.description, f.points_exact, f.points_result);
-  redirect(res, `/admin/boloes/${lastInsertRowid}`, ['ok', 'Bolão criado! Agora adicione os jogos e os participantes.']);
+  redirect(res, `/admin/boloes/${id}`, ['ok', 'Bolão criado! Agora adicione os jogos e os participantes.']);
 });
 
-route('GET', '/admin/boloes/:id', ADMIN, ({ res, user, params, flash }) => {
-  const pool = get('SELECT * FROM pools WHERE id = ?', params.id);
+route('GET', '/admin/boloes/:id', ADMIN, async ({ res, user, params, flash }) => {
+  const pool = await get('SELECT * FROM pools WHERE id = ?', params.id);
   if (!pool) return redirect(res, '/admin', ['err', 'Bolão não encontrado.']);
-  const users = all('SELECT id, name, username FROM users WHERE active = 1 ORDER BY name');
-  const memberIds = new Set(all('SELECT user_id FROM pool_members WHERE pool_id = ?', pool.id).map(r => r.user_id));
-  const matches = all(`SELECT m.*, (SELECT COUNT(*) FROM predictions p WHERE p.match_id = m.id) AS pred_count
+  const users = await all('SELECT id, name, username FROM users WHERE active = 1 ORDER BY name');
+  const memberIds = new Set((await all('SELECT user_id FROM pool_members WHERE pool_id = ?', pool.id)).map(r => r.user_id));
+  const matches = await all(`SELECT m.*, (SELECT COUNT(*)::int FROM predictions p WHERE p.match_id = m.id) AS pred_count
                        FROM matches m WHERE m.pool_id = ? ORDER BY m.kickoff_at, m.id`, pool.id);
-  send(res, 200, V.adminPool({ user, flash, pool, users, memberIds, matches, ranking: computeRanking(pool) }));
+  send(res, 200, V.adminPool({ user, flash, pool, users, memberIds, matches, ranking: await computeRanking(pool) }));
 });
 
-route('POST', '/admin/boloes/:id', ADMIN, ({ res, params, body }) => {
+route('POST', '/admin/boloes/:id', ADMIN, async ({ res, params, body }) => {
   const f = poolFields(body);
   if (!f.name || f.points_exact == null || f.points_result == null) return redirect(res, `/admin/boloes/${params.id}`, ['err', 'Preencha nome e pontuação corretamente.']);
-  run('UPDATE pools SET name = ?, description = ?, points_exact = ?, points_result = ? WHERE id = ?',
+  await run('UPDATE pools SET name = ?, description = ?, points_exact = ?, points_result = ? WHERE id = ?',
     f.name, f.description, f.points_exact, f.points_result, params.id);
   redirect(res, `/admin/boloes/${params.id}`, ['ok', 'Configurações salvas.']);
 });
 
-route('POST', '/admin/boloes/:id/excluir', ADMIN, ({ res, params }) => {
-  run('DELETE FROM pools WHERE id = ?', params.id);
+route('POST', '/admin/boloes/:id/excluir', ADMIN, async ({ res, params }) => {
+  await run('DELETE FROM pools WHERE id = ?', params.id);
   redirect(res, '/admin', ['ok', 'Bolão excluído.']);
 });
 
-route('POST', '/admin/boloes/:id/membros', ADMIN, ({ res, params, body }) => {
-  if (!get('SELECT 1 FROM pools WHERE id = ?', params.id)) return redirect(res, '/admin', ['err', 'Bolão não encontrado.']);
-  tx(() => {
-    run('DELETE FROM pool_members WHERE pool_id = ?', params.id);
-    for (const uid of asIds(body.users)) run('INSERT OR IGNORE INTO pool_members (pool_id, user_id) SELECT ?, id FROM users WHERE id = ?', params.id, uid);
+route('POST', '/admin/boloes/:id/membros', ADMIN, async ({ res, params, body }) => {
+  if (!await get('SELECT 1 FROM pools WHERE id = ?', params.id)) return redirect(res, '/admin', ['err', 'Bolão não encontrado.']);
+  await tx(async ({ run }) => {
+    await run('DELETE FROM pool_members WHERE pool_id = ?', params.id);
+    for (const uid of asIds(body.users)) await run(ADD_MEMBER, params.id, uid);
   });
   redirect(res, `/admin/boloes/${params.id}`, ['ok', 'Participantes atualizados.']);
 });
 
-route('POST', '/admin/boloes/:id/jogos', ADMIN, ({ res, params, body }) => {
-  if (!get('SELECT 1 FROM pools WHERE id = ?', params.id)) return redirect(res, '/admin', ['err', 'Bolão não encontrado.']);
+route('POST', '/admin/boloes/:id/jogos', ADMIN, async ({ res, params, body }) => {
+  if (!await get('SELECT 1 FROM pools WHERE id = ?', params.id)) return redirect(res, '/admin', ['err', 'Bolão não encontrado.']);
   const home = str(body.home_team, 50), away = str(body.away_team, 50), kickoff = localInputToISO(body.kickoff);
   if (!home || !away || !kickoff) return redirect(res, `/admin/boloes/${params.id}`, ['err', 'Preencha os dois times e a data/hora.']);
-  run('INSERT INTO matches (pool_id, home_team, away_team, kickoff_at) VALUES (?, ?, ?, ?)', params.id, home, away, kickoff);
+  await run('INSERT INTO matches (pool_id, home_team, away_team, kickoff_at) VALUES (?, ?, ?, ?)', params.id, home, away, kickoff);
   redirect(res, `/admin/boloes/${params.id}`, ['ok', `Jogo ${home} × ${away} adicionado.`]);
 });
 
-route('POST', '/admin/jogos/:id', ADMIN, ({ res, params, body }) => {
-  const m = get('SELECT * FROM matches WHERE id = ?', params.id);
+route('POST', '/admin/jogos/:id', ADMIN, async ({ res, params, body }) => {
+  const m = await get('SELECT * FROM matches WHERE id = ?', params.id);
   if (!m) return redirect(res, '/admin', ['err', 'Jogo não encontrado.']);
   const back = `/admin/boloes/${m.pool_id}`;
   const home = str(body.home_team, 50), away = str(body.away_team, 50), kickoff = localInputToISO(body.kickoff);
@@ -440,23 +444,26 @@ route('POST', '/admin/jogos/:id', ADMIN, ({ res, params, body }) => {
   if (hs === undefined || as === undefined || (hs === null) !== (as === null)) {
     return redirect(res, back, ['err', 'Placar inválido: preencha os gols dos dois times (ou deixe os dois em branco).']);
   }
-  run('UPDATE matches SET home_team = ?, away_team = ?, kickoff_at = ?, home_score = ?, away_score = ? WHERE id = ?',
+  await run('UPDATE matches SET home_team = ?, away_team = ?, kickoff_at = ?, home_score = ?, away_score = ? WHERE id = ?',
     home, away, kickoff, hs, as, m.id);
   redirect(res, back, ['ok', hs != null ? `Resultado salvo: ${home} ${hs} × ${as} ${away}.` : 'Jogo atualizado.']);
 });
 
-route('POST', '/admin/jogos/:id/excluir', ADMIN, ({ res, params }) => {
-  const m = get('SELECT pool_id FROM matches WHERE id = ?', params.id);
+route('POST', '/admin/jogos/:id/excluir', ADMIN, async ({ res, params }) => {
+  const m = await get('SELECT pool_id FROM matches WHERE id = ?', params.id);
   if (!m) return redirect(res, '/admin', ['err', 'Jogo não encontrado.']);
-  run('DELETE FROM matches WHERE id = ?', params.id);
+  await run('DELETE FROM matches WHERE id = ?', params.id);
   redirect(res, `/admin/boloes/${m.pool_id}`, ['ok', 'Jogo excluído.']);
 });
 
 // ---------------------------------------------------------------- start
 
 if (require.main === module) {
-  ensureAdmin();
-  server.listen(PORT, () => console.log(`Bolão rodando em http://localhost:${PORT}`));
+  (async () => {
+    await init();
+    await ensureAdmin();
+    server.listen(PORT, () => console.log(`Bolão rodando em http://localhost:${PORT}`));
+  })().catch(err => { console.error('Falha ao iniciar:', err); process.exit(1); });
 }
 
 module.exports = { server, scorePrediction, localInputToISO };

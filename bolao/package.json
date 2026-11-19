@@ -4,9 +4,15 @@
   "private": true,
   "description": "Plataforma de bolão de jogos entre amigos",
   "main": "server.js",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node --no-warnings server.js",
     "test": "node --no-warnings --test test/*.test.js"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.14",
+    "pg": "8.23.1"
   }
 }
