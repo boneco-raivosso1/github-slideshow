@@ -9,16 +9,52 @@ function h(v) {
 }
 
 function fmtDate(iso) {
-  return new Date(iso).toLocaleString('pt-BR', {
+  const s = new Date(iso).toLocaleString('pt-BR', {
     timeZone: TIMEZONE, weekday: 'short', day: '2-digit', month: '2-digit',
     hour: '2-digit', minute: '2-digit',
   });
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function matchStatus(m) {
+const fmtDay = t => new Date(t).toLocaleDateString('pt-BR', { timeZone: TIMEZONE });
+const fmtTime = t => new Date(t).toLocaleTimeString('pt-BR', { timeZone: TIMEZONE, hour: '2-digit', minute: '2-digit' });
+
+// Prazo de um jogo: só a hora se for no mesmo dia do jogo
+function fmtClose(m, pool) {
+  const t = closesAt(m, pool);
+  return fmtDay(t) === fmtDay(m.kickoff_at) ? fmtTime(t) : fmtDate(t);
+}
+
+// Momento em que os palpites de um jogo fecham (ms): o que vier primeiro entre
+// "X minutos antes do jogo" e o prazo final do bolão.
+function closesAt(m, pool) {
+  let t = Date.parse(m.kickoff_at) - (pool.close_minutes || 0) * 60000;
+  if (pool.deadline_at) t = Math.min(t, Date.parse(pool.deadline_at));
+  return t;
+}
+
+function matchStatus(m, pool) {
   if (m.home_score != null && m.away_score != null) return { key: 'done', label: 'Encerrado' };
-  if (Date.now() >= Date.parse(m.kickoff_at)) return { key: 'live', label: 'Palpites fechados' };
+  if (Date.now() >= closesAt(m, pool)) return { key: 'live', label: 'Palpites fechados' };
   return { key: 'open', label: 'Aberto para palpites' };
+}
+
+function closeRule(pool) {
+  const parts = [];
+  if (pool.close_minutes) parts.push(`fecham ${pool.close_minutes} min antes de cada jogo`);
+  if (pool.deadline_at) parts.push(`prazo final: ${fmtDate(pool.deadline_at)}`);
+  return parts.length ? `Palpites ${parts.join(' · ')}.` : 'Palpites fecham no horário de início de cada jogo.';
+}
+
+function deadlineFields(pool) {
+  return `
+    <fieldset><legend>Prazo dos palpites</legend>
+      <label>Fechar quantos minutos antes de cada jogo?
+        <input type="number" name="close_minutes" value="${pool ? pool.close_minutes : 0}" min="0" max="1440" required></label>
+      <label>Prazo final para todos os jogos (opcional)
+        <input type="datetime-local" name="deadline" value="${pool && pool.deadline_at ? toLocalInput(pool.deadline_at) : ''}"></label>
+      <p class="small muted">Ex.: 30 minutos → jogo das 19:30 fecha às 19:00. Com prazo final, vale o que fechar primeiro.</p>
+    </fieldset>`;
 }
 
 function pointsBadge(pts, pool) {
@@ -103,12 +139,12 @@ function memberHome({ user, flash, pools }) {
 }
 
 function memberPool({ user, flash, pool, matches, ranking }) {
-  const open = matches.filter(m => matchStatus(m).key === 'open');
-  const closed = matches.filter(m => matchStatus(m).key !== 'open');
+  const open = matches.filter(m => matchStatus(m, pool).key === 'open');
+  const closed = matches.filter(m => matchStatus(m, pool).key !== 'open');
 
   const openCards = open.map(m => `
     <div class="match">
-      <div class="when">${fmtDate(m.kickoff_at)}</div>
+      <div class="when">${fmtDate(m.kickoff_at)} · <strong class="closes">palpite até ${fmtClose(m, pool)}</strong></div>
       <div class="teams">
         <span class="team home">${h(m.home_team)}</span>
         <input class="score" type="number" min="0" max="99" inputmode="numeric" name="h_${m.id}" value="${m.my_home ?? ''}" aria-label="Gols ${h(m.home_team)}">
@@ -120,7 +156,7 @@ function memberPool({ user, flash, pool, matches, ranking }) {
     </div>`).join('');
 
   const closedCards = closed.map(m => {
-    const st = matchStatus(m);
+    const st = matchStatus(m, pool);
     return `
     <div class="match">
       <div class="when">${fmtDate(m.kickoff_at)} · <span class="muted">${st.label}</span></div>
@@ -141,7 +177,7 @@ function memberPool({ user, flash, pool, matches, ranking }) {
     title: pool.name, user, flash, body: `
     <h1>${h(pool.name)}</h1>
     ${pool.description ? `<p class="muted">${h(pool.description)}</p>` : ''}
-    <p class="small muted">Pontuação: placar exato = ${pool.points_exact} pts · acertar vencedor/empate = ${pool.points_result} pt(s).</p>
+    <p class="small muted">Pontuação: placar exato = ${pool.points_exact} pts · acertar vencedor/empate = ${pool.points_result} pt(s).<br>${h(closeRule(pool))}</p>
     <div class="cols">
       <div>
         <section class="card">
@@ -151,7 +187,7 @@ function memberPool({ user, flash, pool, matches, ranking }) {
             ${openCards}
             <button class="wide">Salvar palpites</button>
           </form>
-          <p class="small muted">Você pode alterar seus palpites até o horário de início de cada jogo.</p>`
+          <p class="small muted">Você pode alterar seus palpites até o prazo de cada jogo.</p>`
           : '<p class="muted">Nenhum jogo aberto para palpites no momento.</p>'}
         </section>
         ${closed.length ? `<section class="card"><h2>Jogos fechados</h2>${closedCards}</section>` : ''}
@@ -180,7 +216,7 @@ function rankingTable(ranking, user) {
 }
 
 function matchPredictions({ user, pool, match, rows }) {
-  const st = matchStatus(match);
+  const st = matchStatus(match, pool);
   return layout({
     title: `${match.home_team} × ${match.away_team}`, user, body: `
     <p><a href="${user.is_admin && !rows.some(r => r.user_id === user.id) ? `/admin/boloes/${pool.id}` : `/boloes/${pool.id}`}">← ${h(pool.name)}</a></p>
@@ -243,6 +279,7 @@ function adminHome({ user, flash, users, pools }) {
             <label>Pts placar exato <input type="number" name="points_exact" value="3" min="0" max="100" required></label>
             <label>Pts vencedor/empate <input type="number" name="points_result" value="1" min="0" max="100" required></label>
           </div>
+          ${deadlineFields(null)}
           <button>Criar bolão</button>
         </form>
       </section>
@@ -302,7 +339,7 @@ function toLocalInput(iso) {
 
 function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
   const matchCards = matches.map(m => {
-    const st = matchStatus(m);
+    const st = matchStatus(m, pool);
     return `
     <div class="match admin">
       <form method="post" action="/admin/jogos/${m.id}" class="match-form">
@@ -316,6 +353,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
         <div class="row">
           <label>Data e hora <input type="datetime-local" name="kickoff" value="${toLocalInput(m.kickoff_at)}" required></label>
           <span class="badge ${st.key}">${st.label}</span>
+          <span class="small muted">palpites até ${fmtClose(m, pool)}</span>
           <span class="small muted">${m.pred_count}/${memberIds.size} palpites</span>
           <a class="small" href="/boloes/${pool.id}/jogos/${m.id}">ver palpites</a>
           <button>Salvar</button>
@@ -331,6 +369,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
     title: pool.name, user, flash, body: `
     <p><a href="/admin">← Administração</a></p>
     <h1>${h(pool.name)}</h1>
+    <p class="small muted">${h(closeRule(pool))} <a href="#config">alterar</a></p>
     <div class="cols">
       <div>
         <section class="card">
@@ -360,7 +399,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
           </form>
         </section>
         ${rankingTable(ranking, null)}
-        <section class="card">
+        <section class="card" id="config">
           <h2>Configurações</h2>
           <form method="post" action="/admin/boloes/${pool.id}" class="stack">
             <label>Nome <input name="name" value="${h(pool.name)}" required></label>
@@ -369,6 +408,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
               <label>Pts placar exato <input type="number" name="points_exact" value="${pool.points_exact}" min="0" max="100" required></label>
               <label>Pts vencedor/empate <input type="number" name="points_result" value="${pool.points_result}" min="0" max="100" required></label>
             </div>
+            ${deadlineFields(pool)}
             <button>Salvar</button>
           </form>
           <form method="post" action="/admin/boloes/${pool.id}/excluir" onsubmit="return confirm('Excluir o bolão inteiro, com todos os jogos e palpites?')">
@@ -381,7 +421,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
 }
 
 module.exports = {
-  h, fmtDate, matchStatus, TIMEZONE,
+  h, fmtDate, matchStatus, closesAt, TIMEZONE,
   loginPage, messagePage, memberHome, memberPool, matchPredictions, accountPage,
   adminHome, adminUser, adminPool,
 };

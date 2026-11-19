@@ -103,7 +103,7 @@ test('fluxo completo: admin, participante, palpite, resultado e ranking', async 
   // jogo 1 "começa" e termina 2x1
   await run("UPDATE matches SET kickoff_at = '2020-01-01T00:00:00.000Z' WHERE id = 1");
   r = await joao.post('/boloes/1/palpites', { h_1: '5', a_1: '0' });
-  assert.match(decodeURIComponent(r.location), /já começaram/);
+  assert.match(decodeURIComponent(r.location), /passaram do prazo/);
   r = await admin.post('/admin/jogos/1', { home_team: 'Flamengo', away_team: 'Palmeiras', kickoff: '2020-01-01T00:00', home_score: '2', away_score: '1' });
   assert.match(decodeURIComponent(r.location), /Resultado salvo/);
 
@@ -130,4 +130,37 @@ test('fluxo completo: admin, participante, palpite, resultado e ranking', async 
 test('bloqueia POST vindo de outro site', async () => {
   const res = await fetch(base + '/login', { method: 'POST', headers: { origin: 'http://malicioso.com' }, body: '' });
   assert.equal(res.status, 403);
+});
+
+test('prazo dos palpites: minutos antes do jogo e prazo final', async () => {
+  const admin = client();
+  await admin.post('/login', { username: 'admin', password: 'segredo' });
+  // fecha 30 min antes de cada jogo
+  let r = await admin.post('/admin/boloes', { name: 'Quinta', description: '', points_exact: '3', points_result: '1', close_minutes: '30', deadline: '' });
+  const poolId = Number(r.location.match(/boloes\/(\d+)/)[1]);
+  await admin.post('/admin/usuarios', { name: 'Zé', username: 'zezinho', password: '1234', pools: String(poolId) });
+  await admin.post(`/admin/boloes/${poolId}/jogos`, { home_team: 'A', away_team: 'B', kickoff: isoLocal(20) }); // fecha 10 min atrás
+  await admin.post(`/admin/boloes/${poolId}/jogos`, { home_team: 'C', away_team: 'D', kickoff: isoLocal(90) }); // fecha em 60 min
+  const page = (await admin.get(`/admin/boloes/${poolId}`)).text;
+  const ids = [...page.matchAll(/action="\/admin\/jogos\/(\d+)"/g)].map(m => m[1]);
+
+  const ze = client();
+  await ze.post('/login', { username: 'zezinho', password: '1234' });
+  r = await ze.post(`/boloes/${poolId}/palpites`, { [`h_${ids[0]}`]: '1', [`a_${ids[0]}`]: '0', [`h_${ids[1]}`]: '2', [`a_${ids[1]}`]: '2' });
+  const msg = decodeURIComponent(r.location);
+  assert.match(msg, /1 palpite\(s\) salvo/);
+  assert.match(msg, /1 jogo\(s\) já passaram do prazo/);
+  // depois do prazo, a galera já pode ver os palpites do jogo A
+  assert.equal((await ze.get(`/boloes/${poolId}/jogos/${ids[0]}`)).status, 200);
+  assert.match((await ze.get(`/boloes/${poolId}`)).text, /fecham 30 min antes/);
+
+  // prazo final que já passou fecha todos os jogos, mesmo os mais tarde
+  await admin.post(`/admin/boloes/${poolId}`, { name: 'Quinta', description: '', points_exact: '3', points_result: '1', close_minutes: '0', deadline: isoLocal(-5) });
+  r = await ze.post(`/boloes/${poolId}/palpites`, { [`h_${ids[1]}`]: '3', [`a_${ids[1]}`]: '0' });
+  assert.match(decodeURIComponent(r.location), /passaram do prazo/);
+
+  // removendo o prazo final, volta a abrir
+  await admin.post(`/admin/boloes/${poolId}`, { name: 'Quinta', description: '', points_exact: '3', points_result: '1', close_minutes: '0', deadline: '' });
+  r = await ze.post(`/boloes/${poolId}/palpites`, { [`h_${ids[1]}`]: '3', [`a_${ids[1]}`]: '0' });
+  assert.match(decodeURIComponent(r.location), /1 palpite\(s\) salvo/);
 });

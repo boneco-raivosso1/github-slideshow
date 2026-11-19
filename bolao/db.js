@@ -49,6 +49,10 @@ const SCHEMA = `
     away_score INTEGER,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
+  -- Prazo dos palpites: X minutos antes de cada jogo e/ou um prazo final fixo
+  ALTER TABLE pools ADD COLUMN IF NOT EXISTS close_minutes INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE pools ADD COLUMN IF NOT EXISTS deadline_at TEXT;
+
   CREATE INDEX IF NOT EXISTS idx_matches_pool ON matches(pool_id, kickoff_at);
 
   CREATE TABLE IF NOT EXISTS predictions (

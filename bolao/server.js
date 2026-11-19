@@ -243,14 +243,16 @@ async function poolForUser(poolId, user) {
 }
 
 route('GET', '/boloes', async ({ res, user, flash }) => {
-  const now = new Date().toISOString();
-  const pools = await all(`
-    SELECT p.*,
-      (SELECT COUNT(*)::int FROM matches m WHERE m.pool_id = p.id AND m.kickoff_at > ?) AS open_count,
-      (SELECT COUNT(*)::int FROM matches m WHERE m.pool_id = p.id AND m.kickoff_at > ?
-         AND NOT EXISTS (SELECT 1 FROM predictions x WHERE x.match_id = m.id AND x.user_id = ?)) AS pending_count
-    FROM pools p JOIN pool_members pm ON pm.pool_id = p.id AND pm.user_id = ?
-    ORDER BY p.name`, now, now, user.id, user.id);
+  const pools = await all(`SELECT p.* FROM pools p JOIN pool_members pm ON pm.pool_id = p.id AND pm.user_id = ?
+                           ORDER BY p.name`, user.id);
+  const matches = await all(`SELECT m.*, (x.user_id IS NOT NULL) AS has_pred
+                             FROM matches m JOIN pool_members pm ON pm.pool_id = m.pool_id AND pm.user_id = ?
+                             LEFT JOIN predictions x ON x.match_id = m.id AND x.user_id = ?`, user.id, user.id);
+  for (const p of pools) {
+    const open = matches.filter(m => m.pool_id === p.id && V.matchStatus(m, p).key === 'open');
+    p.open_count = open.length;
+    p.pending_count = open.filter(m => !m.has_pred).length;
+  }
   send(res, 200, V.memberHome({ user, flash, pools }));
 });
 
@@ -265,14 +267,15 @@ route('GET', '/boloes/:id', async ({ res, user, params, flash }) => {
   for (const m of matches) m.points = scorePrediction({ home: m.my_home, away: m.my_away }, m, pool);
   // Fechados: mais recentes primeiro
   matches.sort((a, b) => a.kickoff_at.localeCompare(b.kickoff_at));
-  const open = matches.filter(m => V.matchStatus(m).key === 'open');
-  const closed = matches.filter(m => V.matchStatus(m).key !== 'open').reverse();
+  const open = matches.filter(m => V.matchStatus(m, pool).key === 'open');
+  const closed = matches.filter(m => V.matchStatus(m, pool).key !== 'open').reverse();
   send(res, 200, V.memberPool({ user, flash, pool, matches: [...open, ...closed], ranking: await computeRanking(pool) }));
 });
 
 route('POST', '/boloes/:id/palpites', async ({ res, user, params, body }) => {
   const access = await poolForUser(params.id, user);
   if (!access || !access.member) return redirect(res, '/boloes', ['err', 'Você não participa deste bolão.']);
+  const { pool } = access;
   const matches = await all('SELECT * FROM matches WHERE pool_id = ?', params.id);
   let saved = 0, late = 0, invalid = 0;
   await tx(async ({ run }) => {
@@ -282,7 +285,7 @@ route('POST', '/boloes/:id/palpites', async ({ res, user, params, body }) => {
       const home = intOrNull(body[hk]), away = intOrNull(body[ak]);
       if (home === null && away === null) continue;
       if (home == null || away == null) { invalid++; continue; }
-      if (Date.now() >= Date.parse(m.kickoff_at)) { late++; continue; }
+      if (Date.now() >= V.closesAt(m, pool)) { late++; continue; }
       await run(`INSERT INTO predictions (match_id, user_id, home, away) VALUES (?, ?, ?, ?)
            ON CONFLICT (match_id, user_id) DO UPDATE SET home = excluded.home, away = excluded.away, updated_at = now()`,
         m.id, user.id, home, away);
@@ -291,7 +294,7 @@ route('POST', '/boloes/:id/palpites', async ({ res, user, params, body }) => {
   });
   const msgs = [];
   if (saved) msgs.push(`${saved} palpite(s) salvo(s).`);
-  if (late) msgs.push(`${late} jogo(s) já começaram e não aceitam mais palpite.`);
+  if (late) msgs.push(`${late} jogo(s) já passaram do prazo e não aceitam mais palpite.`);
   if (invalid) msgs.push(`${invalid} palpite(s) incompleto(s) ou inválido(s) foram ignorados.`);
   redirect(res, `/boloes/${params.id}`, [late || invalid ? 'err' : 'ok', msgs.join(' ') || 'Nenhum palpite enviado.']);
 });
@@ -300,8 +303,8 @@ route('GET', '/boloes/:id/jogos/:mid', async ({ res, user, params }) => {
   const access = await poolForUser(params.id, user);
   const match = access && await get('SELECT * FROM matches WHERE id = ? AND pool_id = ?', params.mid, params.id);
   if (!match) return send(res, 404, V.messagePage({ user, title: 'Jogo não encontrado', msg: 'Esse jogo não existe ou você não tem acesso.' }));
-  if (!user.is_admin && V.matchStatus(match).key === 'open') {
-    return send(res, 403, V.messagePage({ user, title: 'Ainda não', msg: 'Os palpites da galera só aparecem depois que o jogo começa.' }));
+  if (!user.is_admin && V.matchStatus(match, access.pool).key === 'open') {
+    return send(res, 403, V.messagePage({ user, title: 'Ainda não', msg: 'Os palpites da galera só aparecem depois que os palpites desse jogo fecham.' }));
   }
   const rows = await all(`SELECT u.id AS user_id, u.name, p.home, p.away
                     FROM pool_members pm JOIN users u ON u.id = pm.user_id
@@ -383,14 +386,20 @@ route('POST', '/admin/usuarios/:id/excluir', ADMIN, async ({ res, user, params }
 function poolFields(body) {
   const points_exact = intOrNull(body.points_exact, 0, 100);
   const points_result = intOrNull(body.points_result, 0, 100);
-  return { name: str(body.name, 80), description: str(body.description, 200), points_exact, points_result };
+  const close_minutes = intOrNull(body.close_minutes ?? '0', 0, 1440) ?? 0;
+  const deadlineRaw = String(body.deadline ?? '').trim();
+  const deadline_at = deadlineRaw ? localInputToISO(deadlineRaw) : null;
+  const valid = !!(str(body.name, 80) && points_exact != null && points_result != null && close_minutes != null
+    && (!deadlineRaw || deadline_at));
+  return { valid, name: str(body.name, 80), description: str(body.description, 200), points_exact, points_result, close_minutes, deadline_at };
 }
 
 route('POST', '/admin/boloes', ADMIN, async ({ res, body }) => {
   const f = poolFields(body);
-  if (!f.name || f.points_exact == null || f.points_result == null) return redirect(res, '/admin', ['err', 'Preencha nome e pontuação corretamente.']);
-  const { id } = await get('INSERT INTO pools (name, description, points_exact, points_result) VALUES (?, ?, ?, ?) RETURNING id',
-    f.name, f.description, f.points_exact, f.points_result);
+  if (!f.valid) return redirect(res, '/admin', ['err', 'Preencha nome, pontuação e prazo corretamente.']);
+  const { id } = await get(`INSERT INTO pools (name, description, points_exact, points_result, close_minutes, deadline_at)
+                            VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
+    f.name, f.description, f.points_exact, f.points_result, f.close_minutes, f.deadline_at);
   redirect(res, `/admin/boloes/${id}`, ['ok', 'Bolão criado! Agora adicione os jogos e os participantes.']);
 });
 
@@ -406,9 +415,9 @@ route('GET', '/admin/boloes/:id', ADMIN, async ({ res, user, params, flash }) =>
 
 route('POST', '/admin/boloes/:id', ADMIN, async ({ res, params, body }) => {
   const f = poolFields(body);
-  if (!f.name || f.points_exact == null || f.points_result == null) return redirect(res, `/admin/boloes/${params.id}`, ['err', 'Preencha nome e pontuação corretamente.']);
-  await run('UPDATE pools SET name = ?, description = ?, points_exact = ?, points_result = ? WHERE id = ?',
-    f.name, f.description, f.points_exact, f.points_result, params.id);
+  if (!f.valid) return redirect(res, `/admin/boloes/${params.id}`, ['err', 'Preencha nome, pontuação e prazo corretamente.']);
+  await run(`UPDATE pools SET name = ?, description = ?, points_exact = ?, points_result = ?, close_minutes = ?, deadline_at = ?
+             WHERE id = ?`, f.name, f.description, f.points_exact, f.points_result, f.close_minutes, f.deadline_at, params.id);
   redirect(res, `/admin/boloes/${params.id}`, ['ok', 'Configurações salvas.']);
 });
 

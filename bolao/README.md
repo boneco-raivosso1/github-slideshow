@@ -61,8 +61,8 @@ Observações:
 
 ## Regras
 
-- Palpites podem ser feitos e alterados até o horário de início do jogo; depois disso, fecham.
-- Os palpites dos outros só aparecem depois que o jogo começa.
+- Palpites podem ser feitos e alterados até o prazo do jogo. Em cada bolão, o admin define quantos minutos antes de cada jogo os palpites fecham e, se quiser, um prazo final fixo (vale o que fechar primeiro).
+- Os palpites dos outros só aparecem depois que os palpites daquele jogo fecham.
 - Pontuação (configurável por bolão): **placar exato = 3 pts**, **acertar vencedor ou empate = 1 pt**.
 - Desempate na classificação: mais placares exatos.
 

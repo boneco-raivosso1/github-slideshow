@@ -115,7 +115,7 @@ form.inline { display: inline; }
 /* Jogos */
 .match { border-top: 1px solid var(--line); padding: .8rem 0; }
 .match:first-of-type { border-top: 0; padding-top: 0; }
-.when { font-size: .85rem; color: var(--muted); text-transform: capitalize; margin-bottom: .35rem; }
+.when { font-size: .85rem; color: var(--muted); margin-bottom: .35rem; }
 .teams { display: grid; grid-template-columns: 1fr auto auto auto 1fr; align-items: center; gap: .5rem; }
 .teams:has(.final) { grid-template-columns: 1fr auto 1fr; }
 .team { font-weight: 600; overflow-wrap: break-word; hyphens: auto; min-width: 0; }
