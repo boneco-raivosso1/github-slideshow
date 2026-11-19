@@ -252,12 +252,21 @@ route('GET', '/boloes', async ({ res, user, flash }) => {
   const matches = await all(`SELECT m.*, (x.user_id IS NOT NULL) AS has_pred
                              FROM matches m JOIN pool_members pm ON pm.pool_id = m.pool_id AND pm.user_id = ?
                              LEFT JOIN predictions x ON x.match_id = m.id AND x.user_id = ?`, user.id, user.id);
+  const summary = { points: 0, exact: 0, pending: 0, main: null };
   for (const p of pools) {
     const open = matches.filter(m => m.pool_id === p.id && V.matchStatus(m, p).key === 'open');
     p.open_count = open.length;
     p.pending_count = open.filter(m => !m.has_pred).length;
+    const ranking = await computeRanking(p);
+    const me = ranking.find(r => r.id === user.id) || { pos: 0, points: 0, exact: 0 };
+    Object.assign(p, { members: ranking.length, pos: me.pos, points: me.points, exact: me.exact,
+      ranked: matches.some(m => m.pool_id === p.id && m.home_score != null) });
+    summary.points += me.points; summary.exact += me.exact; summary.pending += p.pending_count;
   }
-  send(res, 200, V.memberHome({ user, flash, pools }));
+  // Destaque: o bolão com mais palpites pendentes; senão, o primeiro
+  const main = [...pools].sort((a, b) => b.pending_count - a.pending_count)[0];
+  if (main) summary.main = { ...main, pending: main.pending_count, open: main.open_count };
+  send(res, 200, V.memberHome({ user, flash, pools, summary }));
 });
 
 route('GET', '/boloes/:id', async ({ res, user, params, flash }) => {
@@ -371,7 +380,14 @@ route('GET', '/admin', ADMIN, async ({ res, user, flash }) => {
   const pools = await all(`SELECT p.*, (SELECT COUNT(*)::int FROM pool_members pm WHERE pm.pool_id = p.id) AS members,
                      (SELECT COUNT(*)::int FROM matches m WHERE m.pool_id = p.id) AS matches
                      FROM pools p ORDER BY p.created_at DESC`);
-  send(res, 200, V.adminHome({ user, flash, users, pools }));
+  const allPools = new Map((await all('SELECT * FROM pools')).map(p => [p.id, p]));
+  const matches = await all('SELECT * FROM matches');
+  const stats = {
+    matches: matches.length,
+    awaiting: matches.filter(m => V.matchStatus(m, allPools.get(m.pool_id)).key === 'live').length,
+    predictions: (await get('SELECT COUNT(*)::int AS n FROM predictions')).n,
+  };
+  send(res, 200, V.adminHome({ user, flash, users, pools, stats }));
 });
 
 // --- participantes
