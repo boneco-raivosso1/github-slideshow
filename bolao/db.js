@@ -38,6 +38,7 @@ const SCHEMA = `
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     PRIMARY KEY (pool_id, user_id)
   );
+  ALTER TABLE pool_members ADD COLUMN IF NOT EXISTS paid INTEGER NOT NULL DEFAULT 0;
 
   CREATE TABLE IF NOT EXISTS matches (
     id SERIAL PRIMARY KEY,
@@ -52,6 +53,12 @@ const SCHEMA = `
   -- Prazo dos palpites: X minutos antes de cada jogo e/ou um prazo final fixo
   ALTER TABLE pools ADD COLUMN IF NOT EXISTS close_minutes INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE pools ADD COLUMN IF NOT EXISTS deadline_at TEXT;
+
+  -- Inscrição pelo próprio participante e confirmação de pagamento
+  ALTER TABLE pools ADD COLUMN IF NOT EXISTS open_join INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE pools ADD COLUMN IF NOT EXISTS require_payment INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE pools ADD COLUMN IF NOT EXISTS entry_fee TEXT NOT NULL DEFAULT '';
+  ALTER TABLE pools ADD COLUMN IF NOT EXISTS pix_key TEXT NOT NULL DEFAULT '';
 
   CREATE INDEX IF NOT EXISTS idx_matches_pool ON matches(pool_id, kickoff_at);
 

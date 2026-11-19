@@ -81,13 +81,21 @@ function scorePrediction(pred, match, pool) {
   return 0;
 }
 
+// Todos os participantes do bolão, com a informação se o palpite deles vale
+// (se o bolão exige pagamento, só valem os confirmados).
+async function poolMembers(pool) {
+  const rows = await all(`SELECT u.id, u.name, u.username, pm.paid FROM pool_members pm JOIN users u ON u.id = pm.user_id
+                          WHERE pm.pool_id = ? ORDER BY u.name`, pool.id);
+  for (const r of rows) r.counts = !pool.require_payment || !!r.paid;
+  return rows;
+}
+
 async function computeRanking(pool) {
-  const members = await all(`SELECT u.id, u.name FROM pool_members pm JOIN users u ON u.id = pm.user_id
-                       WHERE pm.pool_id = ? ORDER BY u.name`, pool.id);
+  const members = (await poolMembers(pool)).filter(m => m.counts);
   const preds = await all(`SELECT p.user_id, p.home, p.away, m.home_score, m.away_score
                      FROM predictions p JOIN matches m ON m.id = p.match_id
                      WHERE m.pool_id = ? AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL`, pool.id);
-  const table = new Map(members.map(u => [u.id, { ...u, points: 0, exact: 0, result: 0 }]));
+  const table = new Map(members.map(u => [u.id, { id: u.id, name: u.name, points: 0, exact: 0, result: 0 }]));
   for (const p of preds) {
     const row = table.get(p.user_id);
     if (!row) continue;
@@ -218,6 +226,25 @@ route('POST', '/login', { public: true }, async ({ res, body }) => {
   redirect(res, u.is_admin ? '/admin' : '/boloes');
 });
 
+// Primeiro acesso: a própria pessoa cria usuário e senha
+route('GET', '/cadastro', { public: true }, ({ res, user }) => {
+  if (user) return redirect(res, '/');
+  send(res, 200, V.signupPage({}));
+});
+
+route('POST', '/cadastro', { public: true }, async ({ res, body }) => {
+  const name = str(body.name, 60), username = str(body.username, 30), password = String(body.password || '');
+  const fail = error => send(res, 400, V.signupPage({ error, name, username }));
+  if (!name) return fail('Informe seu nome.');
+  if (!/^[A-Za-z0-9_.-]{3,30}$/.test(username)) return fail('Usuário inválido: use de 3 a 30 letras, números, ponto, traço ou _ (sem espaços).');
+  if (password.length < 4) return fail('A senha precisa ter pelo menos 4 caracteres.');
+  if (password !== body.password2) return fail('As senhas não conferem.');
+  if (await get('SELECT 1 FROM users WHERE lower(username) = lower(?)', username)) return fail(`O usuário "${username}" já existe. Escolha outro.`);
+  const { id } = await get('INSERT INTO users (username, name, password_hash) VALUES (?, ?, ?) RETURNING id', username, name, hashPassword(password));
+  await createSession(res, id);
+  redirect(res, '/boloes', ['ok', `Conta criada! Bem-vindo(a), ${name}. Agora escolha o bolão e toque em "Participar".`]);
+});
+
 route('POST', '/logout', { public: true }, async ({ req, res }) => {
   const token = parseCookies(req.headers.cookie).sid;
   if (token) await run('DELETE FROM sessions WHERE token = ?', token);
@@ -242,12 +269,22 @@ route('POST', '/conta/senha', async ({ res, user, body }) => {
 async function poolForUser(poolId, user) {
   const pool = await get('SELECT * FROM pools WHERE id = ?', poolId);
   if (!pool) return null;
-  const member = await get('SELECT 1 FROM pool_members WHERE pool_id = ? AND user_id = ?', poolId, user.id);
-  return member || user.is_admin ? { pool, member: !!member } : null;
+  const member = await get('SELECT paid FROM pool_members WHERE pool_id = ? AND user_id = ?', poolId, user.id);
+  return member || user.is_admin ? { pool, member: !!member, paid: !!(member && member.paid) } : null;
 }
 
+// Participar de um bolão aberto
+route('POST', '/boloes/:id/entrar', async ({ res, user, params }) => {
+  const pool = await get('SELECT * FROM pools WHERE id = ? AND open_join = 1', params.id);
+  if (!pool) return redirect(res, '/boloes', ['err', 'Esse bolão não está aberto para entrada. Fale com o administrador.']);
+  await run(ADD_MEMBER, pool.id, user.id);
+  redirect(res, `/boloes/${pool.id}`, ['ok', pool.require_payment
+    ? `Você entrou no ${pool.name}! Já pode palpitar. Seus palpites passam a valer quando o pagamento for confirmado.`
+    : `Você entrou no ${pool.name}! Já pode palpitar.`]);
+});
+
 route('GET', '/boloes', async ({ res, user, flash }) => {
-  const pools = await all(`SELECT p.* FROM pools p JOIN pool_members pm ON pm.pool_id = p.id AND pm.user_id = ?
+  const pools = await all(`SELECT p.*, pm.paid FROM pools p JOIN pool_members pm ON pm.pool_id = p.id AND pm.user_id = ?
                            ORDER BY p.name`, user.id);
   const matches = await all(`SELECT m.*, (x.user_id IS NOT NULL) AS has_pred
                              FROM matches m JOIN pool_members pm ON pm.pool_id = m.pool_id AND pm.user_id = ?
@@ -266,7 +303,10 @@ route('GET', '/boloes', async ({ res, user, flash }) => {
   // Destaque: o bolão com mais palpites pendentes; senão, o primeiro
   const main = [...pools].sort((a, b) => b.pending_count - a.pending_count)[0];
   if (main) summary.main = { ...main, pending: main.pending_count, open: main.open_count };
-  send(res, 200, V.memberHome({ user, flash, pools, summary }));
+  const available = await all(`SELECT p.*, (SELECT COUNT(*)::int FROM pool_members x WHERE x.pool_id = p.id) AS members
+    FROM pools p WHERE p.open_join = 1
+    AND NOT EXISTS (SELECT 1 FROM pool_members pm WHERE pm.pool_id = p.id AND pm.user_id = ?) ORDER BY p.name`, user.id);
+  send(res, 200, V.memberHome({ user, flash, pools, summary, available }));
 });
 
 route('GET', '/boloes/:id', async ({ res, user, params, flash }) => {
@@ -282,7 +322,8 @@ route('GET', '/boloes/:id', async ({ res, user, params, flash }) => {
   matches.sort((a, b) => a.kickoff_at.localeCompare(b.kickoff_at));
   const open = matches.filter(m => V.matchStatus(m, pool).key === 'open');
   const closed = matches.filter(m => V.matchStatus(m, pool).key !== 'open').reverse();
-  send(res, 200, V.memberPool({ user, flash, pool, matches: [...open, ...closed], ranking: await computeRanking(pool) }));
+  send(res, 200, V.memberPool({ user, flash, pool, matches: [...open, ...closed], ranking: await computeRanking(pool),
+    members: await poolMembers(pool), paid: access.paid }));
 });
 
 route('POST', '/boloes/:id/palpites', async ({ res, user, params, body }) => {
@@ -318,6 +359,8 @@ route('GET', '/boloes/:id/galera', async ({ res, user, params }) => {
   if (!access) return send(res, 404, V.messagePage({ user, title: 'Bolão não encontrado', msg: 'Você não participa deste bolão.' }));
   const { pool } = access;
   const ranking = await computeRanking(pool);
+  const pending = (await poolMembers(pool)).filter(m => !m.counts);
+  const columns = [...ranking, ...pending.map(m => ({ id: m.id, name: m.name, points: null, unconfirmed: true }))];
   const matches = (await all('SELECT * FROM matches WHERE pool_id = ? ORDER BY kickoff_at DESC, id DESC', pool.id))
     .filter(m => V.matchStatus(m, pool).key !== 'open');
   const preds = await all(`SELECT p.match_id, p.user_id, p.home, p.away FROM predictions p
@@ -325,14 +368,14 @@ route('GET', '/boloes/:id/galera', async ({ res, user, params }) => {
   const byKey = new Map(preds.map(p => [`${p.match_id}:${p.user_id}`, p]));
   const grid = matches.map(m => ({
     match: m,
-    cells: ranking.map(u => {
+    cells: columns.map(u => {
       const p = byKey.get(`${m.id}:${u.id}`);
-      return p ? { home: p.home, away: p.away, points: scorePrediction(p, m, pool) } : null;
+      return p ? { home: p.home, away: p.away, points: u.unconfirmed ? null : scorePrediction(p, m, pool), unconfirmed: !!u.unconfirmed } : null;
     }),
   }));
   const openCount = (await all('SELECT * FROM matches WHERE pool_id = ?', pool.id))
     .filter(m => V.matchStatus(m, pool).key === 'open').length;
-  send(res, 200, V.poolGrid({ user, pool, ranking, grid, openCount, member: access.member }));
+  send(res, 200, V.poolGrid({ user, pool, ranking, columns, grid, openCount, member: access.member }));
 });
 
 // Ranking geral: soma dos pontos de todos os bolões
@@ -357,12 +400,15 @@ route('GET', '/boloes/:id/jogos/:mid', async ({ res, user, params }) => {
   if (!user.is_admin && V.matchStatus(match, access.pool).key === 'open') {
     return send(res, 403, V.messagePage({ user, title: 'Ainda não', msg: 'Os palpites da galera só aparecem depois que os palpites desse jogo fecham.' }));
   }
-  const rows = await all(`SELECT u.id AS user_id, u.name, p.home, p.away
+  const rows = await all(`SELECT u.id AS user_id, u.name, p.home, p.away, pm.paid
                     FROM pool_members pm JOIN users u ON u.id = pm.user_id
                     LEFT JOIN predictions p ON p.match_id = ? AND p.user_id = u.id
                     WHERE pm.pool_id = ? ORDER BY u.name`, match.id, params.id);
-  for (const r of rows) r.points = scorePrediction(r, match, access.pool);
-  rows.sort((a, b) => (b.points ?? -1) - (a.points ?? -1) || a.name.localeCompare(b.name, 'pt-BR'));
+  for (const r of rows) {
+    r.counts = !access.pool.require_payment || !!r.paid;
+    r.points = r.counts ? scorePrediction(r, match, access.pool) : null;
+  }
+  rows.sort((a, b) => (b.counts - a.counts) || (b.points ?? -1) - (a.points ?? -1) || a.name.localeCompare(b.name, 'pt-BR'));
   send(res, 200, V.matchPredictions({ user, pool: access.pool, match, rows }));
 });
 
@@ -420,15 +466,18 @@ route('POST', '/admin/usuarios/:id', ADMIN, async ({ res, user, params, body }) 
   const password = String(body.password || '');
   if (password && password.length < 4) return redirect(res, `/admin/usuarios/${target.id}`, ['err', 'A senha precisa ter pelo menos 4 caracteres.']);
   const active = target.id === user.id ? 1 : (body.active ? 1 : 0);
-  await tx(async ({ run }) => {
+  await tx(async ({ all, run }) => {
     await run('UPDATE users SET name = ?, active = ? WHERE id = ?', name, active, target.id);
     if (password) {
       await run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), target.id);
       if (target.id !== user.id) await run('DELETE FROM sessions WHERE user_id = ?', target.id);
     }
     if (!active) await run('DELETE FROM sessions WHERE user_id = ?', target.id);
-    await run('DELETE FROM pool_members WHERE user_id = ?', target.id);
-    for (const pid of asIds(body.pools)) await run(ADD_MEMBER, pid, target.id);
+    const keep = new Set(asIds(body.pools));
+    for (const { pool_id } of await all('SELECT pool_id FROM pool_members WHERE user_id = ?', target.id)) {
+      if (!keep.has(pool_id)) await run('DELETE FROM pool_members WHERE pool_id = ? AND user_id = ?', pool_id, target.id);
+    }
+    for (const pid of keep) await run(ADD_MEMBER, pid, target.id);
   });
   redirect(res, `/admin/usuarios/${target.id}`, ['ok', 'Alterações salvas.']);
 });
@@ -449,15 +498,19 @@ function poolFields(body) {
   const deadline_at = deadlineRaw ? localInputToISO(deadlineRaw) : null;
   const valid = !!(str(body.name, 80) && points_exact != null && points_result != null && close_minutes != null
     && (!deadlineRaw || deadline_at));
-  return { valid, name: str(body.name, 80), description: str(body.description, 200), points_exact, points_result, close_minutes, deadline_at };
+  return { valid, name: str(body.name, 80), description: str(body.description, 200), points_exact, points_result, close_minutes, deadline_at,
+    open_join: body.open_join ? 1 : 0, require_payment: body.require_payment ? 1 : 0,
+    entry_fee: str(body.entry_fee, 30), pix_key: str(body.pix_key, 120) };
 }
 
 route('POST', '/admin/boloes', ADMIN, async ({ res, body }) => {
   const f = poolFields(body);
   if (!f.valid) return redirect(res, '/admin', ['err', 'Preencha nome, pontuação e prazo corretamente.']);
-  const { id } = await get(`INSERT INTO pools (name, description, points_exact, points_result, close_minutes, deadline_at)
-                            VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
-    f.name, f.description, f.points_exact, f.points_result, f.close_minutes, f.deadline_at);
+  const { id } = await get(`INSERT INTO pools (name, description, points_exact, points_result, close_minutes, deadline_at,
+                              open_join, require_payment, entry_fee, pix_key)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    f.name, f.description, f.points_exact, f.points_result, f.close_minutes, f.deadline_at,
+    f.open_join, f.require_payment, f.entry_fee, f.pix_key);
   redirect(res, `/admin/boloes/${id}`, ['ok', 'Bolão criado! Agora adicione os jogos e os participantes.']);
 });
 
@@ -468,14 +521,26 @@ route('GET', '/admin/boloes/:id', ADMIN, async ({ res, user, params, flash }) =>
   const memberIds = new Set((await all('SELECT user_id FROM pool_members WHERE pool_id = ?', pool.id)).map(r => r.user_id));
   const matches = await all(`SELECT m.*, (SELECT COUNT(*)::int FROM predictions p WHERE p.match_id = m.id) AS pred_count
                        FROM matches m WHERE m.pool_id = ? ORDER BY m.kickoff_at, m.id`, pool.id);
-  send(res, 200, V.adminPool({ user, flash, pool, users, memberIds, matches, ranking: await computeRanking(pool) }));
+  send(res, 200, V.adminPool({ user, flash, pool, users, memberIds, matches, ranking: await computeRanking(pool),
+    members: await poolMembers(pool) }));
+});
+
+// Confirmar / desfazer pagamento de um participante
+route('POST', '/admin/boloes/:id/pagamento/:uid', ADMIN, async ({ res, params, body }) => {
+  const paid = body.paid === '1' ? 1 : 0;
+  const r = await run('UPDATE pool_members SET paid = ? WHERE pool_id = ? AND user_id = ?', paid, params.id, params.uid);
+  const u = await get('SELECT name FROM users WHERE id = ?', params.uid);
+  if (!u || !(r.rowCount ?? r.affectedRows)) return redirect(res, `/admin/boloes/${params.id}`, ['err', 'Participante não encontrado neste bolão.']);
+  redirect(res, `/admin/boloes/${params.id}#pagamentos`, ['ok', paid ? `Pagamento de ${u.name} confirmado. Os palpites dele(a) já valem.` : `Confirmação de ${u.name} desfeita.`]);
 });
 
 route('POST', '/admin/boloes/:id', ADMIN, async ({ res, params, body }) => {
   const f = poolFields(body);
   if (!f.valid) return redirect(res, `/admin/boloes/${params.id}`, ['err', 'Preencha nome, pontuação e prazo corretamente.']);
-  await run(`UPDATE pools SET name = ?, description = ?, points_exact = ?, points_result = ?, close_minutes = ?, deadline_at = ?
-             WHERE id = ?`, f.name, f.description, f.points_exact, f.points_result, f.close_minutes, f.deadline_at, params.id);
+  await run(`UPDATE pools SET name = ?, description = ?, points_exact = ?, points_result = ?, close_minutes = ?, deadline_at = ?,
+             open_join = ?, require_payment = ?, entry_fee = ?, pix_key = ? WHERE id = ?`,
+    f.name, f.description, f.points_exact, f.points_result, f.close_minutes, f.deadline_at,
+    f.open_join, f.require_payment, f.entry_fee, f.pix_key, params.id);
   redirect(res, `/admin/boloes/${params.id}`, ['ok', 'Configurações salvas.']);
 });
 
@@ -486,9 +551,12 @@ route('POST', '/admin/boloes/:id/excluir', ADMIN, async ({ res, params }) => {
 
 route('POST', '/admin/boloes/:id/membros', ADMIN, async ({ res, params, body }) => {
   if (!await get('SELECT 1 FROM pools WHERE id = ?', params.id)) return redirect(res, '/admin', ['err', 'Bolão não encontrado.']);
-  await tx(async ({ run }) => {
-    await run('DELETE FROM pool_members WHERE pool_id = ?', params.id);
-    for (const uid of asIds(body.users)) await run(ADD_MEMBER, params.id, uid);
+  await tx(async ({ all, run }) => {
+    const keep = new Set(asIds(body.users));
+    for (const { user_id } of await all('SELECT user_id FROM pool_members WHERE pool_id = ?', params.id)) {
+      if (!keep.has(user_id)) await run('DELETE FROM pool_members WHERE pool_id = ? AND user_id = ?', params.id, user_id);
+    }
+    for (const uid of keep) await run(ADD_MEMBER, params.id, uid);
   });
   redirect(res, `/admin/boloes/${params.id}`, ['ok', 'Participantes atualizados.']);
 });

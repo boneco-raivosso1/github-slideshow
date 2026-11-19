@@ -61,6 +61,13 @@ Observações:
 
 ## Regras
 
+- **Primeiro acesso:** na tela de entrada, a pessoa cria o próprio usuário e senha. Depois ela escolhe um bolão
+  aberto ("Qualquer pessoa cadastrada pode entrar sozinha") e toca em "Participar". O admin também pode cadastrar e
+  incluir participantes manualmente.
+- **Pagamento:** se o bolão estiver com "Só valem os palpites de quem tiver o pagamento confirmado", todos podem
+  palpitar, mas só os participantes com pagamento confirmado pelo admin (Gerenciar bolão → Pagamentos) contam pontos e
+  aparecem na classificação. Todo mundo vê a lista de confirmados e não confirmados, além do valor e da chave Pix.
+
 - Palpites podem ser feitos e alterados até o prazo do jogo. Em cada bolão, o admin define quantos minutos antes de cada jogo os palpites fecham e, se quiser, um prazo final fixo (vale o que fechar primeiro).
 - Quando os palpites de um jogo fecham, todo mundo vê os palpites de todos em "Palpites da galera" (tabela com os pontos de cada um).
 - "Ranking geral" soma os pontos de todos os bolões.

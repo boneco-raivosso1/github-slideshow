@@ -177,3 +177,70 @@ test('prazo dos palpites: minutos antes do jogo e prazo final', async () => {
   r = await ze.post(`/boloes/${poolId}/palpites`, { [`h_${ids[1]}`]: '3', [`a_${ids[1]}`]: '0' });
   assert.match(decodeURIComponent(r.location), /1 palpite\(s\) salvo/);
 });
+
+test('primeiro acesso, entrar no bolão e confirmação de pagamento', async () => {
+  const admin = client();
+  await admin.post('/login', { username: 'admin', password: 'segredo' });
+  let r = await admin.post('/admin/boloes', { name: 'Pix da Quinta', description: '', points_exact: '3', points_result: '1',
+    close_minutes: '0', deadline: '', open_join: '1', require_payment: '1', entry_fee: 'R$ 10', pix_key: 'chave-teste' });
+  const poolId = Number(r.location.match(/boloes\/(\d+)/)[1]);
+  await admin.post(`/admin/boloes/${poolId}/jogos`, { home_team: 'Bahia', away_team: 'Vitória', kickoff: isoLocal(60) });
+  const page = (await admin.get(`/admin/boloes/${poolId}`)).text;
+  const matchId = page.match(/action="\/admin\/jogos\/(\d+)"/)[1];
+
+  // tela de login tem o botão de primeiro acesso
+  assert.match((await client().get('/login')).text, /Primeiro acesso/);
+
+  // cadastro: validações e criação
+  const ana = client(), bia = client();
+  r = await ana.post('/cadastro', { name: 'Ana', username: 'an', password: '1234', password2: '1234' });
+  assert.equal(r.status, 400);
+  r = await ana.post('/cadastro', { name: 'Ana', username: 'ana', password: '1234', password2: '4321' });
+  assert.match(r.text, /não conferem/);
+  r = await ana.post('/cadastro', { name: 'Ana', username: 'ana', password: '1234', password2: '1234' });
+  assert.equal(r.location.split('?')[0], '/boloes');
+  r = await bia.post('/cadastro', { name: 'Bia', username: 'ANA', password: '1234', password2: '1234' });
+  assert.match(r.text, /já existe/);
+  await bia.post('/cadastro', { name: 'Bia', username: 'bia', password: '1234', password2: '1234' });
+
+  // bolões abertos aparecem; bolões fechados para entrada não
+  const home = (await ana.get('/boloes')).text;
+  assert.match(home, /Pix da Quinta/);
+  assert.match(home, /chave-teste/);
+  assert.doesNotMatch(home, /Brasileirão/);
+  assert.match(decodeURIComponent((await ana.post('/boloes/1/entrar')).location), /não está aberto/);
+
+  // as duas entram e palpitam
+  for (const c of [ana, bia]) {
+    assert.match(decodeURIComponent((await c.post(`/boloes/${poolId}/entrar`)).location), /Você entrou/);
+    await c.post(`/boloes/${poolId}/palpites`, { [`h_${matchId}`]: '2', [`a_${matchId}`]: '0' });
+  }
+  assert.match((await ana.get(`/boloes/${poolId}`)).text, /ainda não estão valendo/);
+
+  // admin confirma só a Ana
+  // a lista de pendentes vem em ordem alfabética: o primeiro "Confirmar pagamento" é da Ana
+  const adminPage = (await admin.get(`/admin/boloes/${poolId}`)).text;
+  const anaId = Number(adminPage.match(/pagamento\/(\d+)">\s*<input type="hidden" name="paid" value="1">/)[1]);
+  r = await admin.post(`/admin/boloes/${poolId}/pagamento/${anaId}`, { paid: '1' });
+  assert.match(decodeURIComponent(r.location), /confirmado/);
+
+  // jogo termina 2x0: só a Ana pontua; Bia aparece como não confirmada
+  await run("UPDATE matches SET kickoff_at = '2020-01-01T00:00:00.000Z', home_score = 2, away_score = 0 WHERE id = ?", Number(matchId));
+  const pool = (await bia.get(`/boloes/${poolId}`)).text;
+  assert.match(pool, /Ana<\/td><td><strong>3<\/strong>/);
+  assert.doesNotMatch(pool, /Bia<\/td><td><strong>/);
+  assert.match(pool, /Palpites confirmados \(1\)/);
+  assert.match(pool, /Palpites não confirmados \(1\)/);
+  const galera = (await bia.get(`/boloes/${poolId}/galera`)).text;
+  assert.match(galera, /cell void/);
+  assert.match((await bia.get(`/boloes/${poolId}/jogos/${matchId}`)).text, /Não confirmado/);
+
+  // salvar a lista de participantes não apaga a confirmação
+  const users = [...(await admin.get(`/admin/boloes/${poolId}`)).text.matchAll(/name="users" value="(\d+)" checked/g)].map(m => m[1]);
+  await admin.post(`/admin/boloes/${poolId}/membros`, { users });
+  assert.match((await bia.get(`/boloes/${poolId}`)).text, /Palpites confirmados \(1\)/);
+
+  // desfazer a confirmação tira a Ana da classificação
+  await admin.post(`/admin/boloes/${poolId}/pagamento/${anaId}`, { paid: '0' });
+  assert.doesNotMatch((await bia.get(`/boloes/${poolId}`)).text, /Ana<\/td><td><strong>/);
+});

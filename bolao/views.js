@@ -85,6 +85,19 @@ function statCard(label, value, icon, extra = '') {
 
 const back = (href, label) => `<a class="back" href="${href}">← ${h(label)}</a>`;
 
+function joinFields(pool) {
+  const on = (k, def) => (pool ? pool[k] : def) ? 'checked' : '';
+  return `
+    <fieldset><legend>Entrada e pagamento</legend>
+      <label class="check"><input type="checkbox" name="open_join" value="1" ${on('open_join', true)}> Qualquer pessoa cadastrada pode entrar sozinha neste bolão</label>
+      <label class="check"><input type="checkbox" name="require_payment" value="1" ${on('require_payment', true)}> Só valem os palpites de quem tiver o pagamento confirmado</label>
+      <div class="row">
+        <label>Valor da entrada <input name="entry_fee" value="${h(pool ? pool.entry_fee : '')}" placeholder="Ex.: R$ 10,00"></label>
+        <label>Chave Pix <input name="pix_key" value="${h(pool ? pool.pix_key : '')}" placeholder="Ex.: seu celular ou e-mail"></label>
+      </div>
+    </fieldset>`;
+}
+
 function deadlineFields(pool) {
   return `
     <fieldset><legend>Prazo dos palpites</legend>
@@ -182,9 +195,40 @@ function loginPage({ error, username }) {
         <label>Senha <input name="password" type="password" autocomplete="current-password" required></label>
         <button class="btn full">Entrar</button>
       </form>
-      <p class="muted small">Não tem usuário? Peça ao administrador do bolão.</p>
+      <div class="divider"><span>ou</span></div>
+      <a class="btn secondary full" href="/cadastro">✨ Primeiro acesso? Crie sua conta</a>
     </section>`,
   });
+}
+
+function signupPage({ error, name, username }) {
+  return layout({
+    title: 'Primeiro acesso',
+    flash: error ? { type: 'err', msg: error } : null,
+    body: `
+    <section class="card">
+      <h1>Primeiro acesso</h1>
+      <p class="muted">Crie seu usuário e sua senha para entrar no bolão.</p>
+      <form method="post" action="/cadastro" class="stack">
+        <label>Seu nome (aparece na classificação) <input name="name" value="${h(name)}" placeholder="Ex.: João Silva" autocomplete="name" required autofocus></label>
+        <label>Usuário (para entrar) <input name="username" value="${h(username)}" placeholder="Ex.: joao10" autocomplete="username" autocapitalize="none"
+          pattern="[A-Za-z0-9_.\-]{3,30}" title="3 a 30 caracteres: letras, números, ponto, traço ou _ (sem espaços)" required></label>
+        <label>Senha <input type="password" name="password" minlength="4" autocomplete="new-password" required></label>
+        <label>Repita a senha <input type="password" name="password2" minlength="4" autocomplete="new-password" required></label>
+        <button class="btn full">Criar conta e entrar</button>
+      </form>
+      <p class="muted small">Já tem conta? <a class="link" href="/login">Entrar</a></p>
+    </section>`,
+  });
+}
+
+// Chave Pix / valor da entrada de um bolão
+function paymentInfo(pool) {
+  if (!pool.require_payment) return '';
+  const parts = [];
+  if (pool.entry_fee) parts.push(`Valor: <strong>${h(pool.entry_fee)}</strong>`);
+  if (pool.pix_key) parts.push(`Pix: <strong class="pix">${h(pool.pix_key)}</strong>`);
+  return parts.join(' · ');
 }
 
 function messagePage({ user, title, msg }) {
@@ -193,7 +237,29 @@ function messagePage({ user, title, msg }) {
 
 // ---------- Área do participante ----------
 
-function memberHome({ user, flash, pools, summary }) {
+function availableSection(available) {
+  if (!available.length) return '';
+  return `
+    <div class="card" id="disponiveis">
+      <div class="panel-head"><h2>Bolões abertos para entrar</h2>${tag(`${available.length} disponível(is)`)}</div>
+      <div class="grid three-col">${available.map(p => `
+        <div class="match pool-card">
+          <div class="match-top"><span>${p.members} participante(s)</span>${p.require_payment ? tag('Pago', 'gold') : tag('Grátis')}</div>
+          <b class="pool-name">${h(p.name)}</b>
+          ${p.description ? `<p class="muted small">${h(p.description)}</p>` : ''}
+          ${paymentInfo(p) ? `<p class="small">${paymentInfo(p)}</p>` : ''}
+          <form method="post" action="/boloes/${p.id}/entrar"><button class="btn full sm">Participar</button></form>
+        </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+function memberHome({ user, flash, pools, summary, available = [] }) {
+  if (!pools.length && available.length) {
+    return layout({ title: 'Meus bolões', user, flash, active: 'boloes', body: `
+      ${pageHead({ eyebrow: 'Área do participante', title: `Olá, ${h(user.name)}! 👋`, sub: 'Escolha um bolão para participar.' })}
+      ${availableSection(available)}` });
+  }
   if (!pools.length) {
     const body = user.is_admin
       ? `${pageHead({ eyebrow: 'Meus palpites', title: 'Você não palpita em nenhum bolão', sub: 'Esta tela mostra os bolões em que você participa como jogador.' })}
@@ -207,17 +273,18 @@ function memberHome({ user, flash, pools, summary }) {
   }
 
   const main = summary.main; // bolão em destaque
-  const heroTitle = main.ranked ? `Você está na ${main.pos}ª posição!` : 'Bora palpitar!';
-  const heroText = main.pending
+  const unpaid = main.require_payment && !main.paid;
+  const heroTitle = unpaid ? 'Falta confirmar seu pagamento' : main.ranked ? `Você está na ${main.pos}ª posição!` : 'Bora palpitar!';
+  const heroText = unpaid ? 'Você já pode palpitar, mas seus palpites só valem depois que o administrador confirmar o pagamento.' : main.pending
     ? `Você tem ${main.pending} jogo(s) esperando seu palpite.`
     : main.open ? 'Seus palpites estão em dia. Agora é torcer!' : 'Nenhum jogo aberto para palpites agora.';
 
   const cards = pools.map(p => `
     <a class="match pool-card" href="/boloes/${p.id}">
-      <div class="match-top"><span>${p.members} participante(s)</span>${p.pending_count ? tag(`${p.pending_count} sem palpite`, 'gold') : p.open_count ? tag('Palpites em dia') : tag('Sem jogos abertos', 'gray')}</div>
+      <div class="match-top"><span>${p.members} participante(s)</span>${p.require_payment && !p.paid ? tag('Pagamento pendente', 'red') : p.pending_count ? tag(`${p.pending_count} sem palpite`, 'gold') : p.open_count ? tag('Palpites em dia') : tag('Sem jogos abertos', 'gray')}</div>
       <b class="pool-name">${h(p.name)}</b>
       ${p.description ? `<p class="muted small">${h(p.description)}</p>` : ''}
-      <div class="match-foot"><span>${p.ranked ? `${p.pos}º lugar · ${p.points} pts` : 'Sem resultados ainda'}</span><span class="link">Abrir →</span></div>
+      <div class="match-foot"><span>${p.require_payment && !p.paid ? 'Palpites ainda não valem' : p.ranked ? `${p.pos}º lugar · ${p.points} pts` : 'Sem resultados ainda'}</span><span class="link">Abrir →</span></div>
     </a>`).join('');
 
   return layout({
@@ -230,7 +297,7 @@ function memberHome({ user, flash, pools, summary }) {
       <div class="hero-number">${main.points} <span>pontos</span></div>
     </a>
     <div class="grid stats">
-      ${statCard('Sua posição', main.ranked ? `${main.pos}º` : '–', '🏆', `<span class="muted small">${h(main.name)}</span>`)}
+      ${statCard('Sua posição', main.ranked && !unpaid ? `${main.pos}º` : '–', '🏆', `<span class="muted small">${h(main.name)}</span>`)}
       ${statCard('Pontos', summary.points, '★', '<span class="muted small">Em todos os bolões</span>')}
       ${statCard('Placares exatos', summary.exact, '🎯')}
       ${statCard('Palpites pendentes', summary.pending, '⏱', summary.pending ? tag('Corre lá!', 'gold') : '')}
@@ -238,11 +305,35 @@ function memberHome({ user, flash, pools, summary }) {
     <div class="card">
       <div class="panel-head"><h2>Seus bolões</h2></div>
       <div class="grid three-col">${cards}</div>
-    </div>`,
+    </div>
+    ${availableSection(available)}`,
   });
 }
 
-function memberPool({ user, flash, pool, matches, ranking }) {
+function paymentsCard(pool, members, adminView) {
+  if (!pool.require_payment) return '';
+  const ok = members.filter(m => m.paid), wait = members.filter(m => !m.paid);
+  const row = (m, paid) => `
+    <div class="pay-row">
+      <span class="pay-name">${paid ? '✅' : '⏳'} ${h(m.name)}${adminView ? ` <span class="muted small">@${h(m.username)}</span>` : ''}</span>
+      ${adminView ? `<form method="post" action="/admin/boloes/${pool.id}/pagamento/${m.id}">
+        <input type="hidden" name="paid" value="${paid ? 0 : 1}">
+        <button class="btn sm ${paid ? 'ghost' : ''}">${paid ? 'Desfazer' : 'Confirmar pagamento'}</button></form>` : ''}
+    </div>`;
+  return `
+  <section class="card" id="pagamentos">
+    <div class="panel-head"><h2>Pagamentos</h2>${tag(`${ok.length}/${members.length} confirmados`, ok.length === members.length ? '' : 'gold')}</div>
+    ${paymentInfo(pool) ? `<p class="small">${paymentInfo(pool)}</p>` : ''}
+    <h3>✅ Palpites confirmados (${ok.length})</h3>
+    ${ok.length ? ok.map(m => row(m, true)).join('') : '<p class="muted small">Ninguém confirmado ainda.</p>'}
+    <h3 class="mt">⏳ Palpites não confirmados (${wait.length})</h3>
+    ${wait.length ? wait.map(m => row(m, false)).join('') : '<p class="muted small">Todo mundo pagou! 🎉</p>'}
+    <p class="small muted">Só os palpites confirmados contam pontos e entram na classificação.</p>
+  </section>`;
+}
+
+function memberPool({ user, flash, pool, matches, ranking, members = [], paid = true }) {
+  const unpaid = pool.require_payment && !paid;
   const open = matches.filter(m => matchStatus(m, pool).key === 'open');
   const closed = matches.filter(m => matchStatus(m, pool).key !== 'open');
 
@@ -282,6 +373,9 @@ function memberPool({ user, flash, pool, matches, ranking }) {
     title: pool.name, user, flash, active: 'boloes', body: `
     ${back('/boloes', 'Meus bolões')}
     ${pageHead({ eyebrow: 'Bolão', title: h(pool.name), sub: pool.description ? h(pool.description) : '' })}
+    ${unpaid ? `<div class="notice warn"><strong>⏳ Seus palpites ainda não estão valendo.</strong><br>
+      Faça o pagamento e avise o administrador. Assim que ele confirmar, seus palpites entram na classificação.
+      ${paymentInfo(pool) ? `<br>${paymentInfo(pool)}` : ''}</div>` : pool.require_payment ? '<div class="notice">✅ Pagamento confirmado: seus palpites estão valendo.</div>' : ''}
     <div class="notice">Pontuação: placar exato = ${pool.points_exact} pts · acertar vencedor/empate = ${pool.points_result} pt(s).<br>${h(closeRule(pool))}</div>
     <div class="grid two-col">
       <div>
@@ -300,7 +394,7 @@ function memberPool({ user, flash, pool, matches, ranking }) {
           <a class="btn secondary full mb" href="/boloes/${pool.id}/galera">👀 Ver palpites de todo mundo</a>
           <div class="match-list">${closedCards}</div></section>` : ''}
       </div>
-      <aside>${rankingTable(ranking, user, pool)}</aside>
+      <aside>${rankingTable(ranking, user, pool)}${paymentsCard(pool, members, false)}</aside>
     </div>`,
   });
 }
@@ -329,15 +423,16 @@ function rankingTable(ranking, user, pool) {
 
 function cellHtml(c, pool) {
   if (!c) return '<td class="cell none">—</td>';
+  if (c.unconfirmed) return `<td class="cell void" title="Não confirmado: não vale pontos">${c.home}×${c.away}<small>não vale</small></td>`;
   const cls = c.points == null ? 'wait' : c.points === pool.points_exact ? 'exact' : c.points > 0 ? 'result' : 'miss';
   return `<td class="cell ${cls}">${c.home}×${c.away}${c.points != null ? `<small>+${c.points}</small>` : ''}</td>`;
 }
 
-function poolGrid({ user, pool, ranking, grid, openCount, member }) {
+function poolGrid({ user, pool, ranking, columns = ranking, grid, openCount, member }) {
   const table = grid.length ? `
     <div class="table-scroll">
       <table class="grid-table">
-        <thead><tr><th class="sticky">Jogo</th>${ranking.map(u => `<th class="${u.id === user.id ? 'me' : ''}">${h(u.name)}</th>`).join('')}</tr></thead>
+        <thead><tr><th class="sticky">Jogo</th>${columns.map(u => `<th class="${u.id === user.id ? 'me' : ''} ${u.unconfirmed ? 'unconf' : ''}">${h(u.name)}${u.unconfirmed ? '<small>não confirmado</small>' : ''}</th>`).join('')}</tr></thead>
         <tbody>
           ${grid.map(({ match: m, cells }) => `
           <tr>
@@ -348,12 +443,13 @@ function poolGrid({ user, pool, ranking, grid, openCount, member }) {
             ${cells.map(c => cellHtml(c, pool)).join('')}
           </tr>`).join('')}
         </tbody>
-        <tfoot><tr><td class="sticky"><strong>Total</strong></td>${ranking.map(u => `<td class="cell total">${u.points}</td>`).join('')}</tr></tfoot>
+        <tfoot><tr><td class="sticky"><strong>Total</strong></td>${columns.map(u => `<td class="cell total">${u.unconfirmed ? '<span class="muted">—</span>' : u.points}</td>`).join('')}</tr></tfoot>
       </table>
     </div>
     <p class="small muted legend">
       <span class="cell exact">placar exato</span> <span class="cell result">acertou vencedor</span>
-      <span class="cell miss">errou</span> <span class="cell wait">aguardando resultado</span> — = não palpitou
+      <span class="cell miss">errou</span> <span class="cell wait">aguardando resultado</span>
+      ${columns.some(c => c.unconfirmed) ? '<span class="cell void">não confirmado (não vale)</span>' : ''} — = não palpitou
     </p>` : '<div class="empty">Nenhum jogo fechado ainda. Os palpites aparecem aqui assim que o prazo de cada jogo acabar.</div>';
   return layout({
     title: `Palpites · ${pool.name}`, crumb: 'Palpites da galera', user, active: member ? 'boloes' : 'admin', body: `
@@ -420,7 +516,7 @@ function matchPredictions({ user, pool, match, rows }) {
           ${rows.map(r => `<tr class="${r.user_id === user.id ? 'me' : ''}">
             <td>${h(r.name)}</td>
             <td>${r.home != null ? `<strong>${r.home} × ${r.away}</strong>` : '<span class="muted">não palpitou</span>'}</td>
-            <td>${r.points != null ? pointsBadge(r.points, pool) : '—'}</td>
+            <td>${!r.counts ? tag('Não confirmado', 'gray') : r.points != null ? pointsBadge(r.points, pool) : '—'}</td>
           </tr>`).join('')}
         </tbody>
       </table>
@@ -503,6 +599,7 @@ function adminHome({ user, flash, users, pools, stats }) {
             <label>Pts vencedor/empate <input type="number" name="points_result" value="1" min="0" max="100" required></label>
           </div>
           ${deadlineFields(null)}
+          ${joinFields(null)}
           <button class="btn full">Criar bolão</button>
         </form>
       </section>
@@ -555,7 +652,7 @@ function toLocalInput(iso) {
   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
 }
 
-function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
+function adminPool({ user, flash, pool, users, memberIds, matches, ranking, members = [] }) {
   const matchCards = matches.map(m => {
     const st = matchStatus(m, pool);
     return `
@@ -588,7 +685,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
     ${back('/admin', 'Painel')}
     ${pageHead({
       eyebrow: 'Gerenciar bolão', title: h(pool.name), sub: `${h(closeRule(pool))} <a class="link" href="#config">alterar</a>`,
-      actions: `<a class="btn" href="#novo-jogo">＋ Adicionar jogo</a><a class="btn secondary" href="/boloes/${pool.id}/galera">👀 Palpites da galera</a>`,
+      actions: `<a class="btn" href="#novo-jogo">＋ Adicionar jogo</a>${pool.require_payment ? `<a class="btn secondary" href="#pagamentos">💰 Pagamentos (${members.filter(m => m.paid).length}/${members.length})</a>` : ''}<a class="btn secondary" href="/boloes/${pool.id}/galera">👀 Palpites da galera</a>`,
     })}
     <div class="grid two-col">
       <div>
@@ -618,6 +715,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
             <button class="btn secondary">Salvar participantes</button>
           </form>
         </section>
+        ${paymentsCard(pool, members, true)}
         ${rankingTable(ranking, null, pool)}
         <section class="card" id="config">
           <h2>Configurações</h2>
@@ -629,6 +727,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
               <label>Pts vencedor/empate <input type="number" name="points_result" value="${pool.points_result}" min="0" max="100" required></label>
             </div>
             ${deadlineFields(pool)}
+            ${joinFields(pool)}
             <button class="btn">Salvar</button>
           </form>
           <form method="post" action="/admin/boloes/${pool.id}/excluir" onsubmit="return confirm('Excluir o bolão inteiro, com todos os jogos e palpites?')">
@@ -642,6 +741,6 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking }) {
 
 module.exports = {
   h, fmtDate, matchStatus, closesAt, TIMEZONE,
-  loginPage, messagePage, memberHome, memberPool, matchPredictions, accountPage,
+  loginPage, signupPage, messagePage, memberHome, memberPool, matchPredictions, accountPage,
   adminHome, adminUser, adminPool, poolGrid, generalRanking,
 };
