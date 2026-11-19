@@ -94,7 +94,11 @@ function memberHome({ user, flash, pools }) {
       <h2>${h(p.name)}</h2>
       ${p.description ? `<p class="muted">${h(p.description)}</p>` : ''}
       <p class="small">${p.open_count} jogo(s) aberto(s) · ${p.pending_count} sem seu palpite</p>
-    </a>`).join('') : '<p class="card muted">Você ainda não foi adicionado a nenhum bolão.</p>';
+    </a>`).join('') : user.is_admin
+    ? `<div class="card"><p>Esta tela mostra os bolões em que você <strong>palpita</strong>, e você não está marcado como participante de nenhum.</p>
+       <p>Para cadastrar jogos, ver os palpites da galera e lançar resultados, vá em <a href="/admin">Administração</a> e toque no bolão.</p>
+       <p class="small muted">Se também quiser palpitar, o ideal é criar um participante só para você e entrar com ele.</p></div>`
+    : '<p class="card muted">Você ainda não foi adicionado a nenhum bolão.</p>';
   return layout({ title: 'Meus bolões', user, flash, body: `<h1>Meus bolões</h1><div class="grid">${list}</div>` });
 }
 
