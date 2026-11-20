@@ -508,6 +508,23 @@ route('POST', '/admin/usuarios/:id/excluir', ADMIN, async ({ res, user, params }
   redirect(res, '/admin', ['ok', 'Participante excluído.']);
 });
 
+// --- zerar o app: apaga todos os bolões e todos os usuários que não são administradores
+
+route('POST', '/admin/zerar', ADMIN, async ({ res, body }) => {
+  if (String(body.confirm || '').trim().toUpperCase() !== 'ZERAR') {
+    return redirect(res, '/admin#zerar', ['err', 'Nada foi apagado. Para zerar o app, digite ZERAR no campo de confirmação.']);
+  }
+  const counts = await tx(async ({ get, run }) => {
+    const pools = (await get('SELECT COUNT(*)::int AS n FROM pools')).n;
+    const users = (await get('SELECT COUNT(*)::int AS n FROM users WHERE is_admin = 0')).n;
+    await run('DELETE FROM pools');                    // jogos, palpites e participações vão junto
+    await run('DELETE FROM users WHERE is_admin = 0'); // sessões vão junto
+    await run('UPDATE users SET carry_points = 0');
+    return { pools, users };
+  });
+  redirect(res, '/admin', ['ok', `App zerado: ${counts.pools} bolão(ões) e ${counts.users} usuário(s) apagados. Só os administradores ficaram.`]);
+});
+
 // --- importar rodada a partir do relatório do WhatsApp
 
 route('GET', '/admin/importar', ADMIN, ({ res, user, flash }) => send(res, 200, V.importPage({ user, flash })));

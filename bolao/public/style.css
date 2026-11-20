@@ -289,6 +289,11 @@ textarea:focus { border-color: var(--orange); box-shadow: 0 0 0 3px #ff6b0026; }
 .howto { margin: 0; padding-left: 18px; display: grid; gap: 10px; color: #c5cee0; font-size: 14px; }
 .live-check { flex: 0 0 auto !important; align-self: center; font-size: 13px !important; }
 
+/* Zona de perigo */
+.danger-zone { border-color: #6a2a33; margin-top: 14px; }
+.danger-zone h2 { color: #ff8587; }
+.danger-zone .row > .btn { flex: 0 0 auto; }
+
 /* ---------- Responsivo ---------- */
 @media (max-width: 1050px) {
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

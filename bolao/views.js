@@ -614,7 +614,16 @@ function adminHome({ user, flash, users, pools, stats }) {
           <button class="btn full">Criar participante</button>
         </form>
       </section>
-    </div>`,
+    </div>
+    <section class="card danger-zone" id="zerar">
+      <h2>⚠️ Zerar o app</h2>
+      <p class="small muted">Apaga <strong>todos os bolões</strong> (jogos, palpites e pagamentos) e <strong>todos os usuários que não são administradores</strong>.
+        Os administradores continuam. <strong>Não dá para desfazer.</strong></p>
+      <form method="post" action="/admin/zerar" class="row" onsubmit="return confirm('Tem certeza? Isso apaga TODOS os bolões e TODOS os participantes, e não dá para desfazer.')">
+        <label>Para confirmar, digite ZERAR <input name="confirm" autocomplete="off" autocapitalize="characters" placeholder="ZERAR" required></label>
+        <button class="btn danger">Apagar tudo</button>
+      </form>
+    </section>`,
   });
 }
 

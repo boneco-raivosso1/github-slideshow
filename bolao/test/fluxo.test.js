@@ -315,8 +315,8 @@ test('rodada da pasta seeds é importada uma única vez', async () => {
   const { runSeeds } = require('../server');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'seeds-'));
   try {
-    const seed = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'seeds', '2026-brasileirao-rodada-35.json'), 'utf8'));
-    fs.writeFileSync(path.join(dir, 'teste.json'), JSON.stringify({ ...seed, name: 'Rodada Seed Teste' }));
+    const text = fs.readFileSync(path.join(__dirname, 'rodada35.txt'), 'utf8');
+    fs.writeFileSync(path.join(dir, 'teste.json'), JSON.stringify({ name: 'Rodada Seed Teste', points_exact: 4, points_result: 1, kickoff: '2030-01-01T16:00', text }));
     const first = await runSeeds(dir);
     assert.equal(first.length, 1);
     assert.equal(first[0].predCount, 80);
@@ -330,4 +330,29 @@ test('rodada da pasta seeds é importada uma única vez', async () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('zerar o app apaga bolões e participantes, mantendo só os administradores', async () => {
+  const admin = client();
+  await admin.post('/login', { username: 'admin', password: 'segredo' });
+  const ana = client();
+  assert.equal((await ana.post('/login', { username: 'ana', password: '1234' })).location, '/boloes');
+
+  // sem digitar ZERAR: nada acontece
+  let r = await admin.post('/admin/zerar', { confirm: 'sim' });
+  assert.match(decodeURIComponent(r.location), /Nada foi apagado/);
+  assert.match((await admin.get('/admin')).text, /Pix da Quinta/);
+
+  // participante não pode zerar
+  assert.equal((await ana.post('/admin/zerar', { confirm: 'ZERAR' })).status, 403);
+
+  r = await admin.post('/admin/zerar', { confirm: 'zerar' });
+  assert.match(decodeURIComponent(r.location), /App zerado/);
+  const page = (await admin.get('/admin')).text;
+  assert.doesNotMatch(page, /Pix da Quinta|Rodada 35|Eduardo/);
+  assert.match(page, /Nenhum bolão ainda/);
+  assert.match(page, /Administrador/);
+  assert.equal((await ana.get('/boloes')).location, '/login'); // sessão da participante caiu
+  assert.equal((await client().post('/login', { username: 'ana', password: '1234' })).status, 401);
+  assert.doesNotMatch((await admin.get('/ranking')).text, /Eduardo/);
 });
