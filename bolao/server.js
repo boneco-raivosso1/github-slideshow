@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { init, all, get, run, tx, hashPassword, verifyPassword, ensureAdmin } = require('./db');
 const V = require('./views');
+const { parseReport, titleCase, slug } = require('./importer');
 
 const PORT = Number(process.env.PORT) || 3000;
 const SESSION_DAYS = 30;
@@ -382,9 +383,15 @@ route('GET', '/boloes/:id/galera', async ({ res, user, params }) => {
 route('GET', '/ranking', async ({ res, user }) => {
   const pools = await all('SELECT * FROM pools ORDER BY created_at');
   const total = new Map();
+  const newRow = (id, name, carry) => ({ id, name, carry, points: carry, exact: 0, result: 0, byPool: {} });
+  // Pontos de rodadas anteriores, lançados pelo admin ou pela importação
+  for (const u of await all('SELECT id, name, carry_points FROM users WHERE carry_points <> 0')) {
+    total.set(u.id, newRow(u.id, u.name, u.carry_points));
+  }
+  const carryOf = new Map((await all('SELECT id, carry_points FROM users')).map(u => [u.id, u.carry_points]));
   for (const pool of pools) {
     for (const r of await computeRanking(pool)) {
-      const t = total.get(r.id) || { id: r.id, name: r.name, points: 0, exact: 0, result: 0, byPool: {} };
+      const t = total.get(r.id) || newRow(r.id, r.name, carryOf.get(r.id) || 0);
       t.points += r.points; t.exact += r.exact; t.result += r.result;
       t.byPool[pool.id] = r.points;
       total.set(r.id, t);
@@ -466,8 +473,10 @@ route('POST', '/admin/usuarios/:id', ADMIN, async ({ res, user, params, body }) 
   const password = String(body.password || '');
   if (password && password.length < 4) return redirect(res, `/admin/usuarios/${target.id}`, ['err', 'A senha precisa ter pelo menos 4 caracteres.']);
   const active = target.id === user.id ? 1 : (body.active ? 1 : 0);
+  const carry = intOrNull(body.carry_points ?? '', -9999, 99999);
+  if (carry === undefined) return redirect(res, `/admin/usuarios/${target.id}`, ['err', 'Pontos anteriores inválidos.']);
   await tx(async ({ all, run }) => {
-    await run('UPDATE users SET name = ?, active = ? WHERE id = ?', name, active, target.id);
+    await run('UPDATE users SET name = ?, active = ?, carry_points = ? WHERE id = ?', name, active, carry ?? 0, target.id);
     if (password) {
       await run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), target.id);
       if (target.id !== user.id) await run('DELETE FROM sessions WHERE user_id = ?', target.id);
@@ -486,6 +495,69 @@ route('POST', '/admin/usuarios/:id/excluir', ADMIN, async ({ res, user, params }
   if (params.id === user.id) return redirect(res, '/admin', ['err', 'Você não pode excluir a si mesmo.']);
   await run('DELETE FROM users WHERE id = ?', params.id);
   redirect(res, '/admin', ['ok', 'Participante excluído.']);
+});
+
+// --- importar rodada a partir do relatório do WhatsApp
+
+route('GET', '/admin/importar', ADMIN, ({ res, user, flash }) => send(res, 200, V.importPage({ user, flash })));
+
+route('POST', '/admin/importar', ADMIN, async ({ res, user, body }) => {
+  const fail = error => send(res, 400, V.importPage({ user, flash: { type: 'err', msg: error }, form: body }));
+  const report = parseReport(body.text);
+  if (!report.matches.length) return fail('Não encontrei os jogos. O texto precisa ter a parte *RESULTADOS* com linhas como "CFC x SAN — Coritiba x Santos (não iniciado)".');
+  if (!report.people.length) return fail('Não encontrei os palpites. O texto precisa ter a parte *PONTOS DE CADA UM*.');
+  const titleParts = report.title.split('—').map(s => s.trim()).filter(Boolean);
+  const name = str(body.name, 80) || (titleParts.length > 1 ? titleCase(titleParts.slice(1).join(' — ')) : titleCase(report.title)) || 'Rodada importada';
+  const pe = intOrNull(body.points_exact ?? '4', 0, 100), pr = intOrNull(body.points_result ?? '1', 0, 100);
+  if (pe == null || pr == null) return fail('Pontuação inválida.');
+  const kickoff = localInputToISO(body.kickoff);
+  if (report.matches.some(m => !m.started) && !kickoff) return fail('Informe a data e hora dos jogos que ainda não começaram.');
+  const password = String(body.password || '');
+  if (password.length < 4) return fail('A senha inicial dos novos participantes precisa ter pelo menos 4 caracteres.');
+
+  const startedAt = new Date(Date.now() - 45 * 60000).toISOString();
+  const generalByName = new Map(report.general.map(g => [g.name.toUpperCase(), g.points]));
+  const created = [];
+  let predCount = 0, skipped = 0;
+  const poolId = await tx(async ({ get, run }) => {
+    const { id: pid } = await get(`INSERT INTO pools (name, description, points_exact, points_result, open_join, require_payment)
+      VALUES (?, ?, ?, ?, 1, 1) RETURNING id`, name, report.title ? `Importado de: ${report.title}` : '', pe, pr);
+    const matchIds = new Map();
+    for (const m of report.matches) {
+      const finished = m.finished && m.home_score != null;
+      const live = !finished && m.started && m.home_score != null;
+      const { id } = await get(`INSERT INTO matches (pool_id, home_team, away_team, kickoff_at, home_score, away_score, live)
+        VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`, pid, m.home_team, m.away_team, m.started ? startedAt : kickoff,
+        finished || live ? m.home_score : null, finished || live ? m.away_score : null, live ? 1 : 0);
+      matchIds.set(`${m.home_abbr}-${m.away_abbr}`, id);
+    }
+    for (const p of report.people) {
+      const display = titleCase(p.name);
+      let u = await get('SELECT id FROM users WHERE lower(name) = lower(?) OR lower(username) = lower(?)', display, slug(display));
+      if (!u) {
+        let username = slug(display), n = 2;
+        while (await get('SELECT 1 FROM users WHERE lower(username) = lower(?)', username)) username = `${slug(display)}${n++}`;
+        u = await get('INSERT INTO users (username, name, password_hash) VALUES (?, ?, ?) RETURNING id', username, display, hashPassword(password));
+        created.push(username);
+      }
+      await run('INSERT INTO pool_members (pool_id, user_id, paid) VALUES (?, ?, 1) ON CONFLICT (pool_id, user_id) DO UPDATE SET paid = 1', pid, u.id);
+      const general = generalByName.get(p.name.toUpperCase());
+      if (general != null) await run('UPDATE users SET carry_points = ? WHERE id = ?', general - p.round_points, u.id);
+      for (const pr of p.preds) {
+        const mid = matchIds.get(`${pr.home_abbr}-${pr.away_abbr}`);
+        if (!mid) { skipped++; continue; }
+        await run(`INSERT INTO predictions (match_id, user_id, home, away) VALUES (?, ?, ?, ?)
+          ON CONFLICT (match_id, user_id) DO UPDATE SET home = excluded.home, away = excluded.away`, mid, u.id, pr.home, pr.away);
+        predCount++;
+      }
+    }
+    return pid;
+  });
+  const msg = [`Rodada importada: ${report.matches.length} jogos, ${report.people.length} participantes, ${predCount} palpites.`];
+  if (created.length) msg.push(`Novos usuários (senha inicial que você definiu): ${created.join(', ')}.`);
+  if (report.general.length) msg.push('Pontos de rodadas anteriores lançados no Ranking geral.');
+  if (skipped) msg.push(`${skipped} palpite(s) ignorado(s) por jogo não reconhecido.`);
+  redirect(res, `/admin/boloes/${poolId}`, ['ok', msg.join(' ')]);
 });
 
 // --- bolões
@@ -579,9 +651,11 @@ route('POST', '/admin/jogos/:id', ADMIN, async ({ res, params, body }) => {
   if (hs === undefined || as === undefined || (hs === null) !== (as === null)) {
     return redirect(res, back, ['err', 'Placar inválido: preencha os gols dos dois times (ou deixe os dois em branco).']);
   }
-  await run('UPDATE matches SET home_team = ?, away_team = ?, kickoff_at = ?, home_score = ?, away_score = ? WHERE id = ?',
-    home, away, kickoff, hs, as, m.id);
-  redirect(res, back, ['ok', hs != null ? `Resultado salvo: ${home} ${hs} × ${as} ${away}.` : 'Jogo atualizado.']);
+  const live = body.live && hs != null ? 1 : 0;
+  await run('UPDATE matches SET home_team = ?, away_team = ?, kickoff_at = ?, home_score = ?, away_score = ?, live = ? WHERE id = ?',
+    home, away, kickoff, hs, as, live, m.id);
+  redirect(res, back, ['ok', hs == null ? 'Jogo atualizado.'
+    : live ? `Placar ao vivo atualizado: ${home} ${hs} × ${as} ${away}.` : `Resultado salvo: ${home} ${hs} × ${as} ${away}.`]);
 });
 
 route('POST', '/admin/jogos/:id/excluir', ADMIN, async ({ res, params }) => {

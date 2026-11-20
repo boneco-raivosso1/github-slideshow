@@ -244,3 +244,45 @@ test('primeiro acesso, entrar no bolão e confirmação de pagamento', async () 
   await admin.post(`/admin/boloes/${poolId}/pagamento/${anaId}`, { paid: '0' });
   assert.doesNotMatch((await bia.get(`/boloes/${poolId}`)).text, /Ana<\/td><td><strong>/);
 });
+
+test('importar rodada a partir do relatório do WhatsApp', async () => {
+  const admin = client();
+  await admin.post('/login', { username: 'admin', password: 'segredo' });
+  const text = require('node:fs').readFileSync(require('node:path').join(__dirname, 'rodada35.txt'), 'utf8');
+
+  // sem senha inicial: erro e o texto continua no formulário
+  let r = await admin.post('/admin/importar', { text, name: '', points_exact: '4', points_result: '1', kickoff: isoLocal(600), password: '' });
+  assert.equal(r.status, 400);
+
+  r = await admin.post('/admin/importar', { text, name: '', points_exact: '4', points_result: '1', kickoff: isoLocal(600), password: '1234' });
+  const msg = decodeURIComponent(r.location);
+  assert.match(msg, /10 jogos, 8 participantes, 80 palpites/);
+  assert.match(msg, /paulo\.rossi/);
+  const poolId = Number(r.location.match(/boloes\/(\d+)/)[1]);
+
+  const adminPage = (await admin.get(`/admin/boloes/${poolId}`)).text;
+  assert.match(adminPage, /Brasileirão — Rodada 35/);
+  assert.match(adminPage, /Ao vivo/);
+
+  // participante importado entra com a senha inicial e vê a classificação parcial (MIR 0x0 ao vivo)
+  const eduardo = client();
+  assert.equal((await eduardo.post('/login', { username: 'eduardo', password: '1234' })).location, '/boloes');
+  const pool = (await eduardo.get(`/boloes/${poolId}`)).text;
+  for (const n of ['Camargo', 'Eduardo', 'Fagner', 'Paulo Rossi']) assert.match(pool, new RegExp(`${n}</td><td><strong>1</strong>`));
+  for (const n of ['Bambam', 'Clodivildo', 'Renato', 'Samuel']) assert.match(pool, new RegExp(`${n}</td><td><strong>0</strong>`));
+  assert.match(pool, /Coritiba/);           // jogos futuros abertos para palpite
+  assert.match(pool, /name="h_\d+" value="1"/); // palpite importado já preenchido
+
+  // ranking geral = pontos anteriores + rodada
+  const geral = (await eduardo.get('/ranking')).text;
+  assert.match(geral, /Eduardo<\/td><td><strong>38<\/strong>/);
+  assert.match(geral, /Paulo Rossi<\/td><td><strong>16<\/strong>/);
+  assert.ok(geral.indexOf('Eduardo</td>') < geral.indexOf('Bambam</td>'));
+  assert.match(geral, /Anteriores/);
+
+  // encerrar o jogo ao vivo: vira "Encerrado"
+  const mid = adminPage.match(/action="\/admin\/jogos\/(\d+)"/)[1];
+  r = await admin.post(`/admin/jogos/${mid}`, { home_team: 'Mirassol', away_team: 'Atlético-MG', kickoff: isoLocal(-60), home_score: '1', away_score: '1' });
+  assert.match(decodeURIComponent(r.location), /Resultado salvo/);
+  assert.match((await eduardo.get(`/boloes/${poolId}`)).text, /Eduardo<\/td><td><strong>4<\/strong>/);
+});

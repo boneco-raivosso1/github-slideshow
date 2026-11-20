@@ -34,7 +34,7 @@ function closesAt(m, pool) {
 }
 
 function matchStatus(m, pool) {
-  if (m.home_score != null && m.away_score != null) return { key: 'done', label: 'Encerrado' };
+  if (m.home_score != null && m.away_score != null) return m.live ? { key: 'aovivo', label: '🔴 Ao vivo' } : { key: 'done', label: 'Encerrado' };
   if (Date.now() >= closesAt(m, pool)) return { key: 'live', label: 'Palpites fechados' };
   return { key: 'open', label: 'Aberto para palpites' };
 }
@@ -62,7 +62,7 @@ function crest(name) {
 }
 
 const tag = (txt, kind = '') => `<span class="tag ${kind}">${txt}</span>`;
-const STATUS_TAG = { open: '', live: 'gray', done: 'gray' };
+const STATUS_TAG = { open: '', live: 'gray', done: 'gray', aovivo: 'red' };
 
 function pointsBadge(pts, pool) {
   if (pts == null) return '';
@@ -458,6 +458,7 @@ function poolGrid({ user, pool, ranking, columns = ranking, grid, openCount, mem
 
 function generalRanking({ user, pools, ranking }) {
   const leader = ranking[0];
+  const hasCarry = ranking.some(r => r.carry);
   const body = ranking.length ? `
     <div class="hero static">
       <div class="eyebrow light">Ranking geral · todos os bolões</div>
@@ -470,10 +471,12 @@ function generalRanking({ user, pools, ranking }) {
       <div class="table-scroll">
         <table class="rank">
           <thead><tr><th>#</th><th>Participante</th><th>Total</th><th title="Placares exatos">PE</th><th title="Acertos de vencedor/empate">AV</th>
+            ${hasCarry ? '<th title="Pontos de rodadas anteriores">Anteriores</th>' : ''}
             ${pools.map(p => `<th>${h(p.name)}</th>`).join('')}</tr></thead>
           <tbody>
             ${ranking.map(r => `<tr class="${r.id === user.id ? 'me' : ''}">
               <td class="pos">${r.pos}º</td><td>${h(r.name)}</td><td><strong>${r.points}</strong></td><td>${r.exact}</td><td>${r.result}</td>
+              ${hasCarry ? `<td>${r.carry || 0}</td>` : ''}
               ${pools.map(p => `<td>${r.byPool[p.id] ?? '<span class="muted">–</span>'}</td>`).join('')}
             </tr>`).join('')}
           </tbody>
@@ -550,7 +553,7 @@ function adminHome({ user, flash, users, pools, stats }) {
     ${pageHead({
       eyebrow: 'Painel de controle', title: `Bom jogo, ${h(user.name)}.`,
       sub: 'Acompanhe a atividade dos seus bolões em um só lugar.',
-      actions: '<a class="btn" href="#novo-bolao">＋ Criar bolão</a><a class="btn secondary" href="#novo-participante">＋ Participante</a>',
+      actions: '<a class="btn" href="#novo-bolao">＋ Criar bolão</a><a class="btn secondary" href="#novo-participante">＋ Participante</a><a class="btn secondary" href="/admin/importar">📥 Importar rodada</a>',
     })}
     <div class="grid stats">
       ${statCard('Bolões', String(pools.length).padStart(2, '0'), '👥')}
@@ -620,6 +623,8 @@ function adminUser({ user, flash, target, pools, memberOf }) {
       <form method="post" action="/admin/usuarios/${target.id}" class="stack">
         <label>Nome <input name="name" value="${h(target.name)}" required></label>
         <label>Nova senha <input name="password" minlength="4" placeholder="Deixe em branco para não alterar"></label>
+        <label>Pontos de rodadas anteriores (somam no Ranking geral)
+          <input type="number" name="carry_points" value="${target.carry_points || 0}" min="-9999" max="99999"></label>
         ${target.id !== user.id ? `<label class="check"><input type="checkbox" name="active" value="1" ${target.active ? 'checked' : ''}> Conta ativa (pode entrar no site)</label>` : ''}
         <fieldset><legend>Bolões que pode participar</legend>
           ${pools.length ? pools.map(p => `<label class="check"><input type="checkbox" name="pools" value="${p.id}" ${memberOf.has(p.id) ? 'checked' : ''}> ${h(p.name)}</label>`).join('') : '<p class="muted small">Nenhum bolão criado.</p>'}
@@ -660,6 +665,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking, memb
         </div>
         <div class="row">
           <label>Data e hora <input type="datetime-local" name="kickoff" value="${toLocalInput(m.kickoff_at)}" required></label>
+          <label class="check live-check"><input type="checkbox" name="live" value="1" ${m.live ? 'checked' : ''}> 🔴 Ao vivo (placar parcial)</label>
           <button class="btn">Salvar</button>
         </div>
       </form>
@@ -731,8 +737,44 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking, memb
   });
 }
 
+function importPage({ user, flash, form = {} }) {
+  return layout({
+    title: 'Importar rodada', user, flash, active: 'admin', body: `
+    ${back('/admin', 'Painel')}
+    ${pageHead({ eyebrow: 'Ferramentas', title: 'Importar rodada', sub: 'Cole o relatório da rodada do WhatsApp e o app cria o bolão, os jogos, os participantes e os palpites.' })}
+    <div class="grid two-col">
+      <section class="card">
+        <form method="post" action="/admin/importar" class="stack">
+          <label>Texto do relatório
+            <textarea name="text" rows="16" required placeholder="🏆 *BRASILEIRÃO — RODADA 35* 🏆&#10;*RESULTADOS*&#10;CFC x SAN — Coritiba x Santos (não iniciado)&#10;...&#10;*PONTOS DE CADA UM*&#10;*FULANO — 0 pts*&#10;CFC ( 1 ) x ( 2 ) SAN ⏳">${h(form.text)}</textarea></label>
+          <label>Nome do bolão (opcional) <input name="name" value="${h(form.name)}" placeholder="Em branco: usa o título do relatório, ex. Brasileirão — Rodada 35"></label>
+          <div class="row">
+            <label>Pts placar exato <input type="number" name="points_exact" value="${h(form.points_exact ?? 4)}" min="0" max="100" required></label>
+            <label>Pts vencedor/empate <input type="number" name="points_result" value="${h(form.points_result ?? 1)}" min="0" max="100" required></label>
+          </div>
+          <label>Data e hora dos jogos que ainda não começaram <input type="datetime-local" name="kickoff" value="${h(form.kickoff)}"></label>
+          <label>Senha inicial dos participantes novos <input name="password" value="${h(form.password)}" minlength="4" required placeholder="Ex.: 1234 (cada um troca depois)"></label>
+          <button class="btn full save">📥 Importar rodada</button>
+        </form>
+      </section>
+      <aside>
+        <section class="card">
+          <h2>Como funciona</h2>
+          <ul class="howto">
+            <li><strong>Jogos:</strong> vêm da parte <em>RESULTADOS</em>. "Em andamento" vira jogo 🔴 ao vivo com placar parcial; "encerrado" já entra com o resultado.</li>
+            <li><strong>Participantes:</strong> vêm de <em>PONTOS DE CADA UM</em>. Quem já tem conta com o mesmo nome é reaproveitado; os outros ganham usuário novo (ex.: <em>paulo.rossi</em>) com a senha inicial acima.</li>
+            <li><strong>Pagamento:</strong> todos os importados entram com pagamento confirmado.</li>
+            <li><strong>Classificação geral:</strong> os pontos de rodadas anteriores entram no Ranking geral.</li>
+            <li>Depois de importar, ajuste o dia e a hora de cada jogo em "Gerenciar bolão".</li>
+          </ul>
+        </section>
+      </aside>
+    </div>`,
+  });
+}
+
 module.exports = {
   h, fmtDate, matchStatus, closesAt, TIMEZONE,
   loginPage, signupPage, messagePage, memberHome, memberPool, matchPredictions, accountPage,
-  adminHome, adminUser, adminPool, poolGrid, generalRanking,
+  adminHome, adminUser, adminPool, importPage, poolGrid, generalRanking,
 };

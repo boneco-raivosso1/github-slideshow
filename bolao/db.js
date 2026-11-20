@@ -60,6 +60,10 @@ const SCHEMA = `
   ALTER TABLE pools ADD COLUMN IF NOT EXISTS entry_fee TEXT NOT NULL DEFAULT '';
   ALTER TABLE pools ADD COLUMN IF NOT EXISTS pix_key TEXT NOT NULL DEFAULT '';
 
+  -- Pontos de rodadas anteriores (fora do app) e jogo ao vivo com placar parcial
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS carry_points INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE matches ADD COLUMN IF NOT EXISTS live INTEGER NOT NULL DEFAULT 0;
+
   CREATE INDEX IF NOT EXISTS idx_matches_pool ON matches(pool_id, kickoff_at);
 
   CREATE TABLE IF NOT EXISTS predictions (
