@@ -356,3 +356,61 @@ test('zerar o app apaga bolões e participantes, mantendo só os administradores
   assert.equal((await client().post('/login', { username: 'ana', password: '1234' })).status, 401);
   assert.doesNotMatch((await admin.get('/ranking')).text, /Eduardo/);
 });
+
+test('senha do bolão e prazo único antes do primeiro jogo da rodada (jogos sem horário)', async () => {
+  const admin = client();
+  await admin.post('/login', { username: 'admin', password: 'segredo' });
+  const cfg = extra => ({ name: 'Rodada 36', description: '', points_exact: '4', points_result: '1', open_join: '1', require_payment: '',
+    join_password: 'gol36', close_mode: 'first', close_minutes: '30', round_start: isoLocal(60), ...extra });
+  let r = await admin.post('/admin/boloes', cfg());
+  const poolId = Number(r.location.match(/boloes\/(\d+)/)[1]);
+
+  // jogos sem horário são aceitos no modo "antes do primeiro jogo"
+  r = await admin.post(`/admin/boloes/${poolId}/jogos`, { home_team: 'Flamengo', away_team: 'Vasco', kickoff: '' });
+  assert.match(decodeURIComponent(r.location), /adicionado/);
+  await admin.post(`/admin/boloes/${poolId}/jogos`, { home_team: 'Santos', away_team: 'Bahia', kickoff: '' });
+  const ids = [...(await admin.get(`/admin/boloes/${poolId}`)).text.matchAll(/action="\/admin\/jogos\/(\d+)"/g)].map(m => m[1]);
+  assert.equal(ids.length, 2);
+
+  // participantes veem o bolão com cadeado, mas não a senha
+  const caio = client(), dani = client();
+  await caio.post('/cadastro', { name: 'Caio', username: 'caio', password: '1234', password2: '1234' });
+  await dani.post('/cadastro', { name: 'Dani', username: 'dani', password: '1234', password2: '1234' });
+  const home = (await caio.get('/boloes')).text;
+  assert.match(home, /Rodada 36/);
+  assert.match(home, /Com senha/);
+  assert.doesNotMatch(home, /gol36/);
+
+  // senha errada não entra; certa entra
+  assert.match(decodeURIComponent((await caio.post(`/boloes/${poolId}/entrar`, { password: 'errada' })).location), /incorreta/);
+  assert.equal((await caio.get(`/boloes/${poolId}`)).status, 404);
+  assert.match(decodeURIComponent((await caio.post(`/boloes/${poolId}/entrar`, { password: 'gol36' })).location), /Você entrou/);
+
+  // 5 tentativas erradas bloqueiam, mesmo acertando depois
+  for (let i = 0; i < 5; i++) await dani.post(`/boloes/${poolId}/entrar`, { password: `x${i}` });
+  assert.match(decodeURIComponent((await dani.post(`/boloes/${poolId}/entrar`, { password: 'gol36' })).location), /Muitas tentativas/);
+
+  // prazo: primeiro jogo daqui a 60 min, fecha 30 min antes → ainda aberto
+  const page = (await caio.get(`/boloes/${poolId}`)).text;
+  assert.match(page, /Todos os palpites fecham .* \(30 min antes do primeiro jogo da rodada\)/);
+  assert.match(page, /Jogo da rodada/);
+  r = await caio.post(`/boloes/${poolId}/palpites`, { [`h_${ids[0]}`]: '2', [`a_${ids[0]}`]: '1', [`h_${ids[1]}`]: '0', [`a_${ids[1]}`]: '0' });
+  assert.match(decodeURIComponent(r.location), /2 palpite\(s\) salvo/);
+
+  // primeiro jogo daqui a 20 min → fechou há 10 min: TODOS os jogos fecham juntos
+  await admin.post(`/admin/boloes/${poolId}`, cfg({ round_start: isoLocal(20) }));
+  r = await caio.post(`/boloes/${poolId}/palpites`, { [`h_${ids[1]}`]: '3', [`a_${ids[1]}`]: '0' });
+  assert.match(decodeURIComponent(r.location), /passaram do prazo/);
+  assert.equal((await caio.get(`/boloes/${poolId}/jogos/${ids[1]}`)).status, 200); // palpites da galera liberados
+
+  // sem horário da rodada: vale o jogo mais cedo cadastrado
+  await admin.post(`/admin/boloes/${poolId}`, cfg({ round_start: '' }));
+  await admin.post(`/admin/jogos/${ids[0]}`, { home_team: 'Flamengo', away_team: 'Vasco', kickoff: isoLocal(90) });
+  r = await caio.post(`/boloes/${poolId}/palpites`, { [`h_${ids[1]}`]: '3', [`a_${ids[1]}`]: '0' });
+  assert.match(decodeURIComponent(r.location), /1 palpite\(s\) salvo/);
+
+  // no modo "cada jogo", o horário volta a ser obrigatório
+  await admin.post(`/admin/boloes/${poolId}`, cfg({ close_mode: 'each' }));
+  r = await admin.post(`/admin/boloes/${poolId}/jogos`, { home_team: 'Grêmio', away_team: 'Inter', kickoff: '' });
+  assert.match(decodeURIComponent(r.location), /Informe a data e hora/);
+});

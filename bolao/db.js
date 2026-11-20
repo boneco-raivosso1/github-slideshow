@@ -64,6 +64,12 @@ const SCHEMA = `
   ALTER TABLE users ADD COLUMN IF NOT EXISTS carry_points INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE matches ADD COLUMN IF NOT EXISTS live INTEGER NOT NULL DEFAULT 0;
 
+  -- Senha para entrar no bolão, prazo da rodada (todos fecham antes do primeiro jogo) e jogo sem horário
+  ALTER TABLE pools ADD COLUMN IF NOT EXISTS join_password TEXT NOT NULL DEFAULT '';
+  ALTER TABLE pools ADD COLUMN IF NOT EXISTS close_mode TEXT NOT NULL DEFAULT 'each';
+  ALTER TABLE pools ADD COLUMN IF NOT EXISTS round_start_at TEXT;
+  ALTER TABLE matches ALTER COLUMN kickoff_at DROP NOT NULL;
+
   -- Rodadas importadas automaticamente (pasta seeds/), para não importar duas vezes
   CREATE TABLE IF NOT EXISTS imports (
     key TEXT PRIMARY KEY,

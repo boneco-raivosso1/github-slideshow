@@ -189,7 +189,7 @@ input {
 }
 input:focus { border-color: var(--orange); box-shadow: 0 0 0 3px #ff6b0026; }
 input::placeholder { color: #5d6a82; }
-input[type=checkbox] { width: 18px; height: 18px; padding: 0; accent-color: var(--orange); flex: none; }
+input[type=checkbox], input[type=radio] { width: 18px; height: 18px; padding: 0; accent-color: var(--orange); flex: none; }
 fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px 14px; display: grid; gap: 10px; margin: 0; }
 legend { font-size: 11px; font-weight: 800; color: var(--orange-2); padding: 0 6px; text-transform: uppercase; letter-spacing: .5px; }
 .x { color: var(--muted); font-weight: 900; padding-bottom: 12px; }
@@ -293,6 +293,11 @@ textarea:focus { border-color: var(--orange); box-shadow: 0 0 0 3px #ff6b0026; }
 .danger-zone { border-color: #6a2a33; margin-top: 14px; }
 .danger-zone h2 { color: #ff8587; }
 .danger-zone .row > .btn { flex: 0 0 auto; }
+
+/* Entrar em bolão com senha */
+.join-form { display: flex; gap: 8px; }
+.join-form input { padding: 9px 11px; font-size: 14px; }
+.join-form .btn { flex: none; }
 
 /* ---------- Responsivo ---------- */
 @media (max-width: 1050px) {

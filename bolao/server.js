@@ -278,17 +278,36 @@ route('POST', '/conta/senha', async ({ res, user, body }) => {
 
 // ---------------------------------------------------------------- rotas: participante
 
+// Horário do primeiro jogo cadastrado no bolão (usado no prazo "antes do primeiro jogo")
+const FIRST_KICKOFF = '(SELECT MIN(mm.kickoff_at) FROM matches mm WHERE mm.pool_id = p.id) AS first_kickoff';
+
+// Tentativas erradas de senha de bolão: 5 erros bloqueiam por 10 minutos
+const joinAttempts = new Map();
+
 async function poolForUser(poolId, user) {
-  const pool = await get('SELECT * FROM pools WHERE id = ?', poolId);
+  const pool = await get(`SELECT p.*, ${FIRST_KICKOFF} FROM pools p WHERE p.id = ?`, poolId);
   if (!pool) return null;
   const member = await get('SELECT paid FROM pool_members WHERE pool_id = ? AND user_id = ?', poolId, user.id);
   return member || user.is_admin ? { pool, member: !!member, paid: !!(member && member.paid) } : null;
 }
 
 // Participar de um bolão aberto
-route('POST', '/boloes/:id/entrar', async ({ res, user, params }) => {
+route('POST', '/boloes/:id/entrar', async ({ res, user, params, body }) => {
   const pool = await get('SELECT * FROM pools WHERE id = ? AND open_join = 1', params.id);
   if (!pool) return redirect(res, '/boloes', ['err', 'Esse bolão não está aberto para entrada. Fale com o administrador.']);
+  if (pool.join_password) {
+    const key = `${user.id}:${pool.id}`;
+    const at = joinAttempts.get(key);
+    if (at && at.count >= 5 && at.until > Date.now()) {
+      return redirect(res, '/boloes#disponiveis', ['err', 'Muitas tentativas erradas. Espere 10 minutos ou peça a senha ao administrador.']);
+    }
+    if (String(body.password ?? '').trim() !== pool.join_password) {
+      const next = at && at.until > Date.now() ? at.count + 1 : 1;
+      joinAttempts.set(key, { count: next, until: Date.now() + 10 * 60000 });
+      return redirect(res, '/boloes#disponiveis', ['err', `Senha do bolão ${pool.name} incorreta.`]);
+    }
+    joinAttempts.delete(key);
+  }
   await run(ADD_MEMBER, pool.id, user.id);
   redirect(res, `/boloes/${pool.id}`, ['ok', pool.require_payment
     ? `Você entrou no ${pool.name}! Já pode palpitar. Seus palpites passam a valer quando o pagamento for confirmado.`
@@ -296,7 +315,7 @@ route('POST', '/boloes/:id/entrar', async ({ res, user, params }) => {
 });
 
 route('GET', '/boloes', async ({ res, user, flash }) => {
-  const pools = await all(`SELECT p.*, pm.paid FROM pools p JOIN pool_members pm ON pm.pool_id = p.id AND pm.user_id = ?
+  const pools = await all(`SELECT p.*, ${FIRST_KICKOFF}, pm.paid FROM pools p JOIN pool_members pm ON pm.pool_id = p.id AND pm.user_id = ?
                            ORDER BY p.name`, user.id);
   const matches = await all(`SELECT m.*, (x.user_id IS NOT NULL) AS has_pred
                              FROM matches m JOIN pool_members pm ON pm.pool_id = m.pool_id AND pm.user_id = ?
@@ -331,7 +350,7 @@ route('GET', '/boloes/:id', async ({ res, user, params, flash }) => {
                        WHERE m.pool_id = ? ORDER BY m.kickoff_at, m.id`, user.id, pool.id);
   for (const m of matches) m.points = scorePrediction({ home: m.my_home, away: m.my_away }, m, pool);
   // Fechados: mais recentes primeiro
-  matches.sort((a, b) => a.kickoff_at.localeCompare(b.kickoff_at));
+  matches.sort((a, b) => (a.kickoff_at || '9999').localeCompare(b.kickoff_at || '9999') || a.id - b.id);
   const open = matches.filter(m => V.matchStatus(m, pool).key === 'open');
   const closed = matches.filter(m => V.matchStatus(m, pool).key !== 'open').reverse();
   send(res, 200, V.memberPool({ user, flash, pool, matches: [...open, ...closed], ranking: await computeRanking(pool),
@@ -444,7 +463,7 @@ route('GET', '/admin', ADMIN, async ({ res, user, flash }) => {
   const pools = await all(`SELECT p.*, (SELECT COUNT(*)::int FROM pool_members pm WHERE pm.pool_id = p.id) AS members,
                      (SELECT COUNT(*)::int FROM matches m WHERE m.pool_id = p.id) AS matches
                      FROM pools p ORDER BY p.created_at DESC`);
-  const allPools = new Map((await all('SELECT * FROM pools')).map(p => [p.id, p]));
+  const allPools = new Map((await all(`SELECT p.*, ${FIRST_KICKOFF} FROM pools p`)).map(p => [p.id, p]));
   const matches = await all('SELECT * FROM matches');
   const stats = {
     matches: matches.length,
@@ -631,10 +650,13 @@ function poolFields(body) {
   const close_minutes = intOrNull(body.close_minutes ?? '0', 0, 1440) ?? 0;
   const deadlineRaw = String(body.deadline ?? '').trim();
   const deadline_at = deadlineRaw ? localInputToISO(deadlineRaw) : null;
+  const roundStartRaw = String(body.round_start ?? '').trim();
   const valid = !!(str(body.name, 80) && points_exact != null && points_result != null && close_minutes != null
-    && (!deadlineRaw || deadline_at));
+    && (!deadlineRaw || deadline_at) && (!roundStartRaw || localInputToISO(roundStartRaw)));
   return { valid, name: str(body.name, 80), description: str(body.description, 200), points_exact, points_result, close_minutes, deadline_at,
     open_join: body.open_join ? 1 : 0, require_payment: body.require_payment ? 1 : 0,
+    join_password: str(body.join_password, 40), close_mode: body.close_mode === 'first' ? 'first' : 'each',
+    round_start_at: roundStartRaw ? localInputToISO(roundStartRaw) : null,
     entry_fee: str(body.entry_fee, 30), pix_key: str(body.pix_key, 120) };
 }
 
@@ -642,15 +664,15 @@ route('POST', '/admin/boloes', ADMIN, async ({ res, body }) => {
   const f = poolFields(body);
   if (!f.valid) return redirect(res, '/admin', ['err', 'Preencha nome, pontuação e prazo corretamente.']);
   const { id } = await get(`INSERT INTO pools (name, description, points_exact, points_result, close_minutes, deadline_at,
-                              open_join, require_payment, entry_fee, pix_key)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+                              open_join, require_payment, entry_fee, pix_key, join_password, close_mode, round_start_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     f.name, f.description, f.points_exact, f.points_result, f.close_minutes, f.deadline_at,
-    f.open_join, f.require_payment, f.entry_fee, f.pix_key);
+    f.open_join, f.require_payment, f.entry_fee, f.pix_key, f.join_password, f.close_mode, f.round_start_at);
   redirect(res, `/admin/boloes/${id}`, ['ok', 'Bolão criado! Agora adicione os jogos e os participantes.']);
 });
 
 route('GET', '/admin/boloes/:id', ADMIN, async ({ res, user, params, flash }) => {
-  const pool = await get('SELECT * FROM pools WHERE id = ?', params.id);
+  const pool = await get(`SELECT p.*, ${FIRST_KICKOFF} FROM pools p WHERE p.id = ?`, params.id);
   if (!pool) return redirect(res, '/admin', ['err', 'Bolão não encontrado.']);
   const users = await all('SELECT id, name, username FROM users WHERE active = 1 ORDER BY name');
   const memberIds = new Set((await all('SELECT user_id FROM pool_members WHERE pool_id = ?', pool.id)).map(r => r.user_id));
@@ -673,9 +695,10 @@ route('POST', '/admin/boloes/:id', ADMIN, async ({ res, params, body }) => {
   const f = poolFields(body);
   if (!f.valid) return redirect(res, `/admin/boloes/${params.id}`, ['err', 'Preencha nome, pontuação e prazo corretamente.']);
   await run(`UPDATE pools SET name = ?, description = ?, points_exact = ?, points_result = ?, close_minutes = ?, deadline_at = ?,
-             open_join = ?, require_payment = ?, entry_fee = ?, pix_key = ? WHERE id = ?`,
+             open_join = ?, require_payment = ?, entry_fee = ?, pix_key = ?, join_password = ?, close_mode = ?, round_start_at = ?
+             WHERE id = ?`,
     f.name, f.description, f.points_exact, f.points_result, f.close_minutes, f.deadline_at,
-    f.open_join, f.require_payment, f.entry_fee, f.pix_key, params.id);
+    f.open_join, f.require_payment, f.entry_fee, f.pix_key, f.join_password, f.close_mode, f.round_start_at, params.id);
   redirect(res, `/admin/boloes/${params.id}`, ['ok', 'Configurações salvas.']);
 });
 
@@ -696,10 +719,25 @@ route('POST', '/admin/boloes/:id/membros', ADMIN, async ({ res, params, body }) 
   redirect(res, `/admin/boloes/${params.id}`, ['ok', 'Participantes atualizados.']);
 });
 
+// Horário do jogo: opcional quando o bolão fecha todos os palpites antes do primeiro jogo da rodada
+function kickoffFrom(body, pool) {
+  const raw = String(body.kickoff ?? '').trim();
+  if (!raw) {
+    return pool.close_mode === 'first' ? { ok: true, value: null }
+      : { ok: false, msg: 'Informe a data e hora do jogo (ou, nas configurações do bolão, feche todos os palpites antes do primeiro jogo).' };
+  }
+  const value = localInputToISO(raw);
+  return value ? { ok: true, value } : { ok: false, msg: 'Data e hora do jogo inválidas.' };
+}
+
 route('POST', '/admin/boloes/:id/jogos', ADMIN, async ({ res, params, body }) => {
-  if (!await get('SELECT 1 FROM pools WHERE id = ?', params.id)) return redirect(res, '/admin', ['err', 'Bolão não encontrado.']);
-  const home = str(body.home_team, 50), away = str(body.away_team, 50), kickoff = localInputToISO(body.kickoff);
-  if (!home || !away || !kickoff) return redirect(res, `/admin/boloes/${params.id}`, ['err', 'Preencha os dois times e a data/hora.']);
+  const pool = await get('SELECT * FROM pools WHERE id = ?', params.id);
+  if (!pool) return redirect(res, '/admin', ['err', 'Bolão não encontrado.']);
+  const home = str(body.home_team, 50), away = str(body.away_team, 50);
+  if (!home || !away) return redirect(res, `/admin/boloes/${params.id}`, ['err', 'Preencha os dois times.']);
+  const k = kickoffFrom(body, pool);
+  if (!k.ok) return redirect(res, `/admin/boloes/${params.id}`, ['err', k.msg]);
+  const kickoff = k.value;
   await run('INSERT INTO matches (pool_id, home_team, away_team, kickoff_at) VALUES (?, ?, ?, ?)', params.id, home, away, kickoff);
   redirect(res, `/admin/boloes/${params.id}`, ['ok', `Jogo ${home} × ${away} adicionado.`]);
 });
@@ -708,9 +746,12 @@ route('POST', '/admin/jogos/:id', ADMIN, async ({ res, params, body }) => {
   const m = await get('SELECT * FROM matches WHERE id = ?', params.id);
   if (!m) return redirect(res, '/admin', ['err', 'Jogo não encontrado.']);
   const back = `/admin/boloes/${m.pool_id}`;
-  const home = str(body.home_team, 50), away = str(body.away_team, 50), kickoff = localInputToISO(body.kickoff);
+  const home = str(body.home_team, 50), away = str(body.away_team, 50);
   const hs = intOrNull(body.home_score), as = intOrNull(body.away_score);
-  if (!home || !away || !kickoff) return redirect(res, back, ['err', 'Preencha os dois times e a data/hora.']);
+  if (!home || !away) return redirect(res, back, ['err', 'Preencha os dois times.']);
+  const k = kickoffFrom(body, await get('SELECT * FROM pools WHERE id = ?', m.pool_id));
+  if (!k.ok) return redirect(res, back, ['err', k.msg]);
+  const kickoff = k.value;
   if (hs === undefined || as === undefined || (hs === null) !== (as === null)) {
     return redirect(res, back, ['err', 'Placar inválido: preencha os gols dos dois times (ou deixe os dois em branco).']);
   }

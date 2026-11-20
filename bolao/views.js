@@ -22,13 +22,23 @@ const fmtTime = t => new Date(t).toLocaleTimeString('pt-BR', { timeZone: TIMEZON
 // Prazo de um jogo: só a hora se for no mesmo dia do jogo
 function fmtClose(m, pool) {
   const t = closesAt(m, pool);
-  return fmtDay(t) === fmtDay(m.kickoff_at) ? fmtTime(t) : fmtDate(t);
+  if (!Number.isFinite(t)) return 'a definir';
+  return m.kickoff_at && fmtDay(t) === fmtDay(m.kickoff_at) ? fmtTime(t) : fmtDate(t);
 }
 
-// Momento em que os palpites de um jogo fecham (ms): o que vier primeiro entre
-// "X minutos antes do jogo" e o prazo final do bolão.
+// Data do jogo, ou um rótulo quando o jogo não tem horário (bolão que fecha antes do primeiro jogo)
+const when = m => (m.kickoff_at ? fmtDate(m.kickoff_at) : 'Jogo da rodada');
+
+// Momento em que os palpites de um jogo fecham (ms).
+// - close_mode 'first': todos fecham X min antes do primeiro jogo da rodada
+//   (round_start_at informado pelo admin, ou o jogo mais cedo cadastrado: first_kickoff);
+// - close_mode 'each': cada jogo fecha X min antes do seu horário.
+// Um prazo final fixo (deadline_at), se houver, vale quando for antes.
+// Sem nenhum horário, os palpites ficam abertos (Infinity).
+function roundStart(pool) { return pool.round_start_at || pool.first_kickoff || null; }
 function closesAt(m, pool) {
-  let t = Date.parse(m.kickoff_at) - (pool.close_minutes || 0) * 60000;
+  const base = pool.close_mode === 'first' ? roundStart(pool) : (m.kickoff_at || pool.round_start_at);
+  let t = base ? Date.parse(base) - (pool.close_minutes || 0) * 60000 : Infinity;
   if (pool.deadline_at) t = Math.min(t, Date.parse(pool.deadline_at));
   return t;
 }
@@ -40,6 +50,12 @@ function matchStatus(m, pool) {
 }
 
 function closeRule(pool) {
+  if (pool.close_mode === 'first') {
+    const base = roundStart(pool), min = pool.close_minutes || 0;
+    const t = base ? Math.min(Date.parse(base) - min * 60000, pool.deadline_at ? Date.parse(pool.deadline_at) : Infinity) : null;
+    return t ? `Todos os palpites fecham ${fmtDate(t)} (${min} min antes do primeiro jogo da rodada).`
+      : `Todos os palpites fecham ${min} min antes do primeiro jogo da rodada (horário ainda não definido).`;
+  }
   const parts = [];
   if (pool.close_minutes) parts.push(`fecham ${pool.close_minutes} min antes de cada jogo`);
   if (pool.deadline_at) parts.push(`prazo final: ${fmtDate(pool.deadline_at)}`);
@@ -93,7 +109,9 @@ function joinFields(pool) {
   const on = (k, def) => (pool ? pool[k] : def) ? 'checked' : '';
   return `
     <fieldset><legend>Entrada e pagamento</legend>
-      <label class="check"><input type="checkbox" name="open_join" value="1" ${on('open_join', true)}> Qualquer pessoa cadastrada pode entrar sozinha neste bolão</label>
+      <label class="check"><input type="checkbox" name="open_join" value="1" ${on('open_join', true)}> Aparece na lista de bolões para todos os participantes</label>
+      <label>Senha do bolão <input name="join_password" value="${h(pool ? pool.join_password : '')}" maxlength="40" autocomplete="off" placeholder="Em branco: entra sem senha"></label>
+      <p class="small muted">Para entrar no bolão, o participante precisa digitar essa senha. Passe a senha só para quem pode participar.</p>
       <label class="check"><input type="checkbox" name="require_payment" value="1" ${on('require_payment', true)}> Só valem os palpites de quem tiver o pagamento confirmado</label>
       <div class="row">
         <label>Valor da entrada <input name="entry_fee" value="${h(pool ? pool.entry_fee : '')}" placeholder="Ex.: R$ 10,00"></label>
@@ -103,13 +121,20 @@ function joinFields(pool) {
 }
 
 function deadlineFields(pool) {
+  const mode = pool ? pool.close_mode : 'first';
   return `
     <fieldset><legend>Prazo dos palpites</legend>
-      <label>Fechar quantos minutos antes de cada jogo?
-        <input type="number" name="close_minutes" value="${pool ? pool.close_minutes : 0}" min="0" max="1440" required></label>
-      <label>Prazo final para todos os jogos (opcional)
-        <input type="datetime-local" name="deadline" value="${pool && pool.deadline_at ? toLocalInput(pool.deadline_at) : ''}"></label>
-      <p class="small muted">Ex.: 30 minutos → jogo das 19:30 fecha às 19:00. Com prazo final, vale o que fechar primeiro.</p>
+      <label class="check"><input type="radio" name="close_mode" value="first" ${mode === 'first' ? 'checked' : ''}>
+        <span>Todos os palpites fecham juntos, antes do <strong>primeiro jogo da rodada</strong></span></label>
+      <label class="check"><input type="radio" name="close_mode" value="each" ${mode !== 'first' ? 'checked' : ''}>
+        <span>Cada jogo fecha antes do seu próprio horário</span></label>
+      <label>Horário do primeiro jogo da rodada
+        <input type="datetime-local" name="round_start" value="${pool && pool.round_start_at ? toLocalInput(pool.round_start_at) : ''}"></label>
+      <label>Fechar quantos minutos antes?
+        <input type="number" name="close_minutes" value="${pool ? pool.close_minutes : 30}" min="0" max="1440" required></label>
+      <input type="hidden" name="deadline" value="${pool && pool.deadline_at ? toLocalInput(pool.deadline_at) : ''}">
+      <p class="small muted">Ex.: primeiro jogo sábado 16:30 e 30 minutos → <strong>todos os palpites fecham sábado 16:00</strong>.
+        Assim os jogos não precisam de horário. Se deixar o horário em branco, vale o jogo mais cedo cadastrado.</p>
     </fieldset>`;
 }
 
@@ -237,14 +262,18 @@ function availableSection(available) {
   if (!available.length) return '';
   return `
     <div class="card" id="disponiveis">
-      <div class="panel-head"><h2>Bolões abertos para entrar</h2>${tag(`${available.length} disponível(is)`)}</div>
+      <div class="panel-head"><h2>Bolões disponíveis</h2>${tag(`${available.length} disponível(is)`)}</div>
       <div class="grid three-col">${available.map(p => `
         <div class="match pool-card">
-          <div class="match-top"><span>${p.members} participante(s)</span>${p.require_payment ? tag('Pago', 'gold') : tag('Grátis')}</div>
+          <div class="match-top"><span>${p.members} participante(s)</span><span>${p.join_password ? tag('🔒 Com senha', 'gray') : ''} ${p.require_payment ? tag('Pago', 'gold') : tag('Grátis')}</span></div>
           <b class="pool-name">${h(p.name)}</b>
           ${p.description ? `<p class="muted small">${h(p.description)}</p>` : ''}
           ${paymentInfo(p) ? `<p class="small">${paymentInfo(p)}</p>` : ''}
-          <form method="post" action="/boloes/${p.id}/entrar"><button class="btn full sm">Participar</button></form>
+          ${p.join_password ? `
+          <form method="post" action="/boloes/${p.id}/entrar" class="join-form">
+            <input type="password" name="password" placeholder="Senha do bolão" autocomplete="off" required aria-label="Senha do bolão ${h(p.name)}">
+            <button class="btn sm">Entrar</button>
+          </form>` : `<form method="post" action="/boloes/${p.id}/entrar"><button class="btn full sm">Participar</button></form>`}
         </div>`).join('')}
       </div>
     </div>`;
@@ -335,7 +364,7 @@ function memberPool({ user, flash, pool, matches, ranking, members = [], paid = 
 
   const openCards = open.map(m => `
     <div class="match">
-      <div class="match-top"><span>${fmtDate(m.kickoff_at)}</span>${tag(`Palpite até ${fmtClose(m, pool)}`, 'gold')}</div>
+      <div class="match-top"><span>${when(m)}</span>${tag(`Palpite até ${fmtClose(m, pool)}`, 'gold')}</div>
       <div class="teams">
         <div class="team">${crest(m.home_team)}<span class="tname">${h(m.home_team)}</span></div>
         <div class="scoreline">
@@ -352,7 +381,7 @@ function memberPool({ user, flash, pool, matches, ranking, members = [], paid = 
     const st = matchStatus(m, pool);
     return `
     <div class="match">
-      <div class="match-top"><span>${fmtDate(m.kickoff_at)}</span>${tag(st.label, STATUS_TAG[st.key])}</div>
+      <div class="match-top"><span>${when(m)}</span>${tag(st.label, STATUS_TAG[st.key])}</div>
       <div class="teams">
         <div class="team">${crest(m.home_team)}<span class="tname">${h(m.home_team)}</span></div>
         <span class="final">${st.key === 'done' ? `${m.home_score} × ${m.away_score}` : '– × –'}</span>
@@ -434,7 +463,7 @@ function poolGrid({ user, pool, ranking, columns = ranking, grid, openCount, mem
           <tr>
             <td class="sticky">
               <div class="gm">${h(m.home_team)} <strong>${m.home_score != null ? `${m.home_score}×${m.away_score}` : '×'}</strong> ${h(m.away_team)}</div>
-              <div class="small muted">${fmtDate(m.kickoff_at)}</div>
+              <div class="small muted">${when(m)}</div>
             </td>
             ${cells.map(c => cellHtml(c, pool)).join('')}
           </tr>`).join('')}
@@ -502,7 +531,7 @@ function matchPredictions({ user, pool, match, rows }) {
     title: `${match.home_team} × ${match.away_team}`, crumb: 'Palpites do jogo', user, active: fromAdmin ? 'admin' : 'boloes', body: `
     ${back(fromAdmin ? `/admin/boloes/${pool.id}` : `/boloes/${pool.id}`, pool.name)}
     <section class="card narrow-lg">
-      <div class="match-top"><span>${fmtDate(match.kickoff_at)}</span>${tag(st.label, STATUS_TAG[st.key])}</div>
+      <div class="match-top"><span>${when(match)}</span>${tag(st.label, STATUS_TAG[st.key])}</div>
       <div class="teams big">
         <div class="team">${crest(match.home_team)}<span class="tname">${h(match.home_team)}</span></div>
         <span class="final">${st.key === 'done' ? `${match.home_score} × ${match.away_score}` : '– × –'}</span>
@@ -667,7 +696,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking, memb
     const st = matchStatus(m, pool);
     return `
     <div class="match admin">
-      <div class="match-top"><span>${fmtDate(m.kickoff_at)} · palpites até ${fmtClose(m, pool)}</span>${tag(st.label, STATUS_TAG[st.key])}</div>
+      <div class="match-top"><span>${when(m)} · palpites até ${fmtClose(m, pool)}</span>${tag(st.label, STATUS_TAG[st.key])}</div>
       <form method="post" action="/admin/jogos/${m.id}" class="match-form">
         <div class="row teams-edit">
           <label>Mandante <input name="home_team" value="${h(m.home_team)}" required></label>
@@ -677,7 +706,7 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking, memb
           <label>Visitante <input name="away_team" value="${h(m.away_team)}" required></label>
         </div>
         <div class="row">
-          <label>Data e hora <input type="datetime-local" name="kickoff" value="${toLocalInput(m.kickoff_at)}" required></label>
+          <label>Data e hora <input type="datetime-local" name="kickoff" value="${m.kickoff_at ? toLocalInput(m.kickoff_at) : ''}" ${pool.close_mode === 'first' ? '' : 'required'}></label>
           <label class="check live-check"><input type="checkbox" name="live" value="1" ${m.live ? 'checked' : ''}> 🔴 Ao vivo (placar parcial)</label>
           <button class="btn">Salvar</button>
         </div>
@@ -708,7 +737,8 @@ function adminPool({ user, flash, pool, users, memberIds, matches, ranking, memb
               <span class="x">×</span>
               <label>Visitante <input name="away_team" placeholder="Time visitante" required></label>
             </div>
-            <label>Data e hora do jogo <input type="datetime-local" name="kickoff" required></label>
+            <label>Data e hora do jogo${pool.close_mode === 'first' ? ' (opcional)' : ''}
+              <input type="datetime-local" name="kickoff" ${pool.close_mode === 'first' ? '' : 'required'}></label>
             <button class="btn full">Adicionar jogo</button>
           </form>
         </section>
