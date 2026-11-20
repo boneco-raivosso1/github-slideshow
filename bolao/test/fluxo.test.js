@@ -288,26 +288,26 @@ test('importar rodada a partir do relatório do WhatsApp', async () => {
 });
 
 test('escudo do time aparece quando existe o arquivo', async () => {
-  const fs = require('node:fs'), path = require('node:path');
-  const ESC = require('../escudos');
-  const file = path.join(ESC.DIR, 'atletico-mineiro.svg');
-  fs.writeFileSync(file, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5"/></svg>');
-  try {
-    ESC.load();
-    const eduardo = client();
-    await eduardo.post('/login', { username: 'eduardo', password: '1234' });
-    const boloes = (await eduardo.get('/boloes')).text;
-    const id = boloes.match(/href="\/boloes\/(\d+)"/)[1];
-    const html = (await eduardo.get(`/boloes/${id}`)).text;
-    assert.match(html, /<img class="crest img" src="\/escudos\/atletico-mineiro\.svg"/); // "Atlético-MG"
-    assert.match(html, /class="crest" style="--hue/);                                  // outros times: iniciais
-    const img = await fetch(base + '/escudos/atletico-mineiro.svg');
-    assert.equal(img.headers.get('content-type'), 'image/svg+xml');
-    assert.equal((await fetch(base + '/escudos/..%2Fserver.js')).status, 404);
-  } finally {
-    fs.unlinkSync(file);
-    ESC.load();
-  }
+  // Rodada 35 (importada antes): todos os times têm escudo em public/escudos
+  const eduardo = client();
+  await eduardo.post('/login', { username: 'eduardo', password: '1234' });
+  const id = (await eduardo.get('/boloes')).text.match(/href="\/boloes\/(\d+)"/)[1];
+  const html = (await eduardo.get(`/boloes/${id}`)).text;
+  assert.match(html, /<img class="crest img" src="\/escudos\/atletico-mineiro\.png"/);     // "Atlético-MG"
+  assert.match(html, /<img class="crest img" src="\/escudos\/athletico-paranaense\.png"/); // "Athletico-PR"
+  assert.match(html, /<img class="crest img" src="\/escudos\/bragantino\.png"/);           // "Red Bull Bragantino"
+  assert.match(html, /<img class="crest img" src="\/escudos\/sao-paulo\.png"/);            // "São Paulo"
+
+  // time sem escudo (jogo "C x D" do bolão Quinta): continua com as iniciais
+  const ze = client();
+  await ze.post('/login', { username: 'zezinho', password: '1234' });
+  const zid = (await ze.get('/boloes')).text.match(/href="\/boloes\/(\d+)"/)[1];
+  assert.match((await ze.get(`/boloes/${zid}`)).text, /class="crest" style="--hue/);
+
+  const img = await fetch(base + '/escudos/flamengo.png');
+  assert.equal(img.headers.get('content-type'), 'image/png');
+  assert.equal((await fetch(base + '/escudos/..%2Fserver.js')).status, 404);
+  assert.equal((await fetch(base + '/escudos/nao-existe.png')).status, 404);
 });
 
 test('rodada da pasta seeds é importada uma única vez', async () => {

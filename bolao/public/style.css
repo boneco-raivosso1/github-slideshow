@@ -312,7 +312,10 @@ textarea:focus { border-color: var(--orange); box-shadow: 0 0 0 3px #ff6b0026; }
   .hero h2 { font-size: 22px; }
   .hero-number { font-size: 28px; }
   .teams { gap: 6px; }
-  .team { font-size: 13px; gap: 6px; }
+  /* No celular: escudo em cima, nome embaixo (sem cortar o nome no meio) */
+  .team, .team.away { flex-direction: column; justify-content: center; text-align: center; font-size: 13px; gap: 5px; }
+  .team.away { flex-direction: column-reverse; }
+  .tname { overflow-wrap: normal; word-break: normal; line-height: 1.2; }
   .crest { width: 26px; height: 26px; font-size: 9px; }
   .score-input { width: 44px; height: 44px; font-size: 18px; }
   .match { padding: 11px 12px; }
@@ -326,6 +329,6 @@ textarea:focus { border-color: var(--orange); box-shadow: 0 0 0 3px #ff6b0026; }
   .mobile-nav a.active { color: var(--orange); }
 }
 @media (max-width: 380px) {
-  .crest { display: none; }
   .brand-name b { display: none; }
+  .team { font-size: 12px; }
 }
