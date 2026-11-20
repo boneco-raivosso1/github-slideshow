@@ -512,25 +512,15 @@ route('POST', '/admin/usuarios/:id/excluir', ADMIN, async ({ res, user, params }
 
 route('GET', '/admin/importar', ADMIN, ({ res, user, flash }) => send(res, 200, V.importPage({ user, flash })));
 
-route('POST', '/admin/importar', ADMIN, async ({ res, user, body }) => {
-  const fail = error => send(res, 400, V.importPage({ user, flash: { type: 'err', msg: error }, form: body }));
-  const report = parseReport(body.text);
-  if (!report.matches.length) return fail('Não encontrei os jogos. O texto precisa ter a parte *RESULTADOS* com linhas como "CFC x SAN — Coritiba x Santos (não iniciado)".');
-  if (!report.people.length) return fail('Não encontrei os palpites. O texto precisa ter a parte *PONTOS DE CADA UM*.');
-  const titleParts = report.title.split('—').map(s => s.trim()).filter(Boolean);
-  const name = str(body.name, 80) || (titleParts.length > 1 ? titleCase(titleParts.slice(1).join(' — ')) : titleCase(report.title)) || 'Rodada importada';
-  const pe = intOrNull(body.points_exact ?? '4', 0, 100), pr = intOrNull(body.points_result ?? '1', 0, 100);
-  if (pe == null || pr == null) return fail('Pontuação inválida.');
-  const kickoff = localInputToISO(body.kickoff);
-  if (report.matches.some(m => !m.started) && !kickoff) return fail('Informe a data e hora dos jogos que ainda não começaram.');
-  const password = String(body.password || '');
-  if (password.length < 4) return fail('A senha inicial dos novos participantes precisa ter pelo menos 4 caracteres.');
-
+// Cria bolão, jogos, participantes e palpites a partir de um relatório já lido.
+// password: senha inicial dos participantes novos (null = senha aleatória; o admin define depois).
+async function importReport({ report, name, pe, pr, kickoff, password, seedKey = null }) {
   const startedAt = new Date(Date.now() - 45 * 60000).toISOString();
   const generalByName = new Map(report.general.map(g => [g.name.toUpperCase(), g.points]));
   const created = [];
   let predCount = 0, skipped = 0;
   const poolId = await tx(async ({ get, run }) => {
+    if (seedKey) await run('INSERT INTO imports (key) VALUES (?)', seedKey);
     const { id: pid } = await get(`INSERT INTO pools (name, description, points_exact, points_result, open_join, require_payment)
       VALUES (?, ?, ?, ?, 1, 1) RETURNING id`, name, report.title ? `Importado de: ${report.title}` : '', pe, pr);
     const matchIds = new Map();
@@ -548,7 +538,8 @@ route('POST', '/admin/importar', ADMIN, async ({ res, user, body }) => {
       if (!u) {
         let username = slug(display), n = 2;
         while (await get('SELECT 1 FROM users WHERE lower(username) = lower(?)', username)) username = `${slug(display)}${n++}`;
-        u = await get('INSERT INTO users (username, name, password_hash) VALUES (?, ?, ?) RETURNING id', username, display, hashPassword(password));
+        const pw = password || crypto.randomBytes(12).toString('base64url');
+        u = await get('INSERT INTO users (username, name, password_hash) VALUES (?, ?, ?) RETURNING id', username, display, hashPassword(pw));
         created.push(username);
       }
       await run('INSERT INTO pool_members (pool_id, user_id, paid) VALUES (?, ?, 1) ON CONFLICT (pool_id, user_id) DO UPDATE SET paid = 1', pid, u.id);
@@ -564,12 +555,56 @@ route('POST', '/admin/importar', ADMIN, async ({ res, user, body }) => {
     }
     return pid;
   });
-  const msg = [`Rodada importada: ${report.matches.length} jogos, ${report.people.length} participantes, ${predCount} palpites.`];
-  if (created.length) msg.push(`Novos usuários (senha inicial que você definiu): ${created.join(', ')}.`);
+  return { poolId, created, predCount, skipped };
+}
+
+const defaultPoolName = report => {
+  const parts = report.title.split('—').map(s => s.trim()).filter(Boolean);
+  return (parts.length > 1 ? titleCase(parts.slice(1).join(' — ')) : titleCase(report.title)) || 'Rodada importada';
+};
+
+route('POST', '/admin/importar', ADMIN, async ({ res, user, body }) => {
+  const fail = error => send(res, 400, V.importPage({ user, flash: { type: 'err', msg: error }, form: body }));
+  const report = parseReport(body.text);
+  if (!report.matches.length) return fail('Não encontrei os jogos. O texto precisa ter a parte *RESULTADOS* com linhas como "CFC x SAN — Coritiba x Santos (não iniciado)".');
+  if (!report.people.length) return fail('Não encontrei os palpites. O texto precisa ter a parte *PONTOS DE CADA UM*.');
+  const name = str(body.name, 80) || defaultPoolName(report);
+  const pe = intOrNull(body.points_exact ?? '4', 0, 100), pr = intOrNull(body.points_result ?? '1', 0, 100);
+  if (pe == null || pr == null) return fail('Pontuação inválida.');
+  const kickoff = localInputToISO(body.kickoff);
+  if (report.matches.some(m => !m.started) && !kickoff) return fail('Informe a data e hora dos jogos que ainda não começaram.');
+  const password = String(body.password || '');
+  if (password.length < 4) return fail('A senha inicial dos novos participantes precisa ter pelo menos 4 caracteres.');
+
+  const r = await importReport({ report, name, pe, pr, kickoff, password });
+  const msg = [`Rodada importada: ${report.matches.length} jogos, ${report.people.length} participantes, ${r.predCount} palpites.`];
+  if (r.created.length) msg.push(`Novos usuários (senha inicial que você definiu): ${r.created.join(', ')}.`);
   if (report.general.length) msg.push('Pontos de rodadas anteriores lançados no Ranking geral.');
-  if (skipped) msg.push(`${skipped} palpite(s) ignorado(s) por jogo não reconhecido.`);
-  redirect(res, `/admin/boloes/${poolId}`, ['ok', msg.join(' ')]);
+  if (r.skipped) msg.push(`${r.skipped} palpite(s) ignorado(s) por jogo não reconhecido.`);
+  redirect(res, `/admin/boloes/${r.poolId}`, ['ok', msg.join(' ')]);
 });
+
+// Rodadas que vêm junto com o código (pasta seeds/): cada arquivo é importado uma única vez
+// quando o site inicia. Se o admin apagar o bolão depois, ele não volta.
+const SEEDS_DIR = process.env.SEEDS_DIR || path.join(__dirname, 'seeds');
+async function runSeeds(dir = SEEDS_DIR) {
+  let files = [];
+  try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort(); } catch { return []; }
+  const done = [];
+  for (const f of files) {
+    if (await get('SELECT 1 FROM imports WHERE key = ?', f)) continue;
+    const seed = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+    const report = parseReport(seed.text);
+    if (!report.matches.length || !report.people.length) { console.warn(`Seed ${f}: relatório sem jogos ou palpites, ignorado.`); continue; }
+    const r = await importReport({
+      report, name: seed.name || defaultPoolName(report), pe: seed.points_exact ?? 4, pr: seed.points_result ?? 1,
+      kickoff: localInputToISO(seed.kickoff) || new Date(Date.now() + 864e5).toISOString(), password: null, seedKey: f,
+    });
+    console.log(`Seed ${f}: bolão "${seed.name}" criado (${r.predCount} palpites, ${r.created.length} usuário(s) novo(s)).`);
+    done.push({ file: f, ...r });
+  }
+  return done;
+}
 
 // --- bolões
 
@@ -682,8 +717,9 @@ if (require.main === module) {
   (async () => {
     await init();
     await ensureAdmin();
+    await runSeeds().catch(err => console.error('Falha ao importar seeds:', err));
     server.listen(PORT, () => console.log(`Bolão rodando em http://localhost:${PORT}`));
   })().catch(err => { console.error('Falha ao iniciar:', err); process.exit(1); });
 }
 
-module.exports = { server, scorePrediction, localInputToISO };
+module.exports = { server, scorePrediction, localInputToISO, runSeeds };

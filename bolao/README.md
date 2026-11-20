@@ -74,6 +74,12 @@ Observações:
 - Pontuação (configurável por bolão): **placar exato = 3 pts**, **acertar vencedor ou empate = 1 pt**.
 - Desempate na classificação: mais placares exatos.
 
+## Rodadas que vêm junto com o código (pasta `seeds/`)
+
+Cada arquivo `.json` em `seeds/` (com `name`, `points_exact`, `points_result`, `kickoff` e o `text` do relatório)
+é importado automaticamente **uma única vez** quando o site inicia. Participantes novos ganham senha aleatória:
+o admin define a senha de cada um em Painel → participante → Nova senha. Se o bolão for apagado, ele não volta.
+
 ## Testes
 
 ```bash

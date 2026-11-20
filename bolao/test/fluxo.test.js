@@ -309,3 +309,25 @@ test('escudo do time aparece quando existe o arquivo', async () => {
     ESC.load();
   }
 });
+
+test('rodada da pasta seeds é importada uma única vez', async () => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const { runSeeds } = require('../server');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'seeds-'));
+  try {
+    const seed = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'seeds', '2026-brasileirao-rodada-35.json'), 'utf8'));
+    fs.writeFileSync(path.join(dir, 'teste.json'), JSON.stringify({ ...seed, name: 'Rodada Seed Teste' }));
+    const first = await runSeeds(dir);
+    assert.equal(first.length, 1);
+    assert.equal(first[0].predCount, 80);
+    assert.deepEqual(await runSeeds(dir), []); // segunda vez: nada
+
+    const admin = client();
+    await admin.post('/login', { username: 'admin', password: 'segredo' });
+    const page = (await admin.get(`/admin/boloes/${first[0].poolId}`)).text;
+    assert.match(page, /Rodada Seed Teste/);
+    assert.match(page, /Coritiba/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

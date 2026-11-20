@@ -64,6 +64,12 @@ const SCHEMA = `
   ALTER TABLE users ADD COLUMN IF NOT EXISTS carry_points INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE matches ADD COLUMN IF NOT EXISTS live INTEGER NOT NULL DEFAULT 0;
 
+  -- Rodadas importadas automaticamente (pasta seeds/), para não importar duas vezes
+  CREATE TABLE IF NOT EXISTS imports (
+    key TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
   CREATE INDEX IF NOT EXISTS idx_matches_pool ON matches(pool_id, kickoff_at);
 
   CREATE TABLE IF NOT EXISTS predictions (
