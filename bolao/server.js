@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { init, all, get, run, tx, hashPassword, verifyPassword, ensureAdmin } = require('./db');
 const V = require('./views');
+const ESC = require('./escudos');
 const { parseReport, titleCase, slug } = require('./importer');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -171,6 +172,16 @@ const CSS_PATH = path.join(__dirname, 'public', 'style.css');
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
+
+    // Escudos dos times
+    if (req.method === 'GET' && url.pathname.startsWith('/escudos/')) {
+      const file = url.pathname.slice('/escudos/'.length);
+      if (!ESC.FILE_RE.test(file) || !fs.existsSync(path.join(ESC.DIR, file))) { res.writeHead(404); return res.end(); }
+      const types = { png: 'image/png', webp: 'image/webp', svg: 'image/svg+xml', jpg: 'image/jpeg', jpeg: 'image/jpeg' };
+      res.writeHead(200, { 'Content-Type': types[file.split('.').pop()], 'Cache-Control': 'public, max-age=86400',
+        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" });
+      return fs.createReadStream(path.join(ESC.DIR, file)).pipe(res);
+    }
 
     if (req.method === 'GET' && url.pathname === '/style.css') {
       res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'max-age=300' });

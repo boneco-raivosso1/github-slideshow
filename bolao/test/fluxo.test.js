@@ -286,3 +286,26 @@ test('importar rodada a partir do relatório do WhatsApp', async () => {
   assert.match(decodeURIComponent(r.location), /Resultado salvo/);
   assert.match((await eduardo.get(`/boloes/${poolId}`)).text, /Eduardo<\/td><td><strong>4<\/strong>/);
 });
+
+test('escudo do time aparece quando existe o arquivo', async () => {
+  const fs = require('node:fs'), path = require('node:path');
+  const ESC = require('../escudos');
+  const file = path.join(ESC.DIR, 'atletico-mineiro.svg');
+  fs.writeFileSync(file, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5"/></svg>');
+  try {
+    ESC.load();
+    const eduardo = client();
+    await eduardo.post('/login', { username: 'eduardo', password: '1234' });
+    const boloes = (await eduardo.get('/boloes')).text;
+    const id = boloes.match(/href="\/boloes\/(\d+)"/)[1];
+    const html = (await eduardo.get(`/boloes/${id}`)).text;
+    assert.match(html, /<img class="crest img" src="\/escudos\/atletico-mineiro\.svg"/); // "Atlético-MG"
+    assert.match(html, /class="crest" style="--hue/);                                  // outros times: iniciais
+    const img = await fetch(base + '/escudos/atletico-mineiro.svg');
+    assert.equal(img.headers.get('content-type'), 'image/svg+xml');
+    assert.equal((await fetch(base + '/escudos/..%2Fserver.js')).status, 404);
+  } finally {
+    fs.unlinkSync(file);
+    ESC.load();
+  }
+});

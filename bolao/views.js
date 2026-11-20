@@ -55,7 +55,11 @@ const initials = name => {
 };
 
 // "Escudo" com as iniciais do time, numa cor fixa por nome
+const { crestUrl } = require('./escudos');
+
 function crest(name) {
+  const url = crestUrl(name);
+  if (url) return `<img class="crest img" src="${url}" alt="" loading="lazy">`;
   let hash = 0;
   for (const c of String(name)) hash = (hash * 31 + c.codePointAt(0)) >>> 0;
   return `<span class="crest" style="--hue:${hash % 360}" aria-hidden="true">${h(initials(name))}</span>`;

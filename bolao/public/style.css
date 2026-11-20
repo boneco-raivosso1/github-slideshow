@@ -209,6 +209,7 @@ legend { font-size: 11px; font-weight: 800; color: var(--orange-2); padding: 0 6
   font-size: 10px; font-weight: 900; letter-spacing: .2px;
   background: hsl(var(--hue) 55% 30%); color: #fff; border: 2px solid hsl(var(--hue) 60% 45%);
 }
+.crest.img { background: none; border: 0; border-radius: 0; object-fit: contain; filter: drop-shadow(0 1px 2px #0008); }
 .scoreline { display: flex; align-items: center; gap: 6px; color: var(--muted); }
 /* Caixa de placar no estilo "botão de odd" */
 .score-input {
